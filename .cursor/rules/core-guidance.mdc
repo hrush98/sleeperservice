@@ -1,0 +1,64 @@
+---
+description: Core project guidelines and architecture — always reference this for big-picture alignment
+globs:
+  - "**/*"
+alwaysApply: true
+---
+
+# Project Core Instructions
+
+You are working on a project that builds a **Prediction Market Intelligence Engine** (starting with Polymarket) with a path to deeper analytics and (later) optional automated execution.
+
+Before implementing any meaningful change:
+1) Read **@project-plan.md** (scope, milestones, constraints, quality bar).
+2) Read **@architecture.md** (components, data flow, interfaces).
+3) Propose a small plan (files touched + steps + verification commands).
+4) Implement.
+5) Verify locally (commands + expected output).
+
+## Core principles
+- Build in **small, testable vertical slices** (end-to-end > partial layers).
+- Prefer **simple, explicit code**; avoid premature frameworks and over-abstraction.
+- Keep historical data **append-only** where relevant; prefer idempotent ingestion.
+- Persist raw API payloads when uncertain; avoid schema loss.
+- Every feature must have a clear **“how to verify”** section.
+
+## Documentation discipline
+- Keep docs as first-class artifacts:
+  - `/docs/adr/` — architecture decisions (short, specific)
+  - `/docs/evals/` — evaluation reports (periodic)
+  - `/docs/build-log/` — build notes (optional)
+
+## Plan + architecture updates (required)
+If you make a change that alters any of the following, you MUST update **@project-plan.md** and/or **@architecture.md** accordingly:
+- component boundaries (api/worker/shared)
+- database schema (tables/columns/indexes/constraints)
+- ingestion cadence or data sources
+- scoring/evaluation methodology
+- deployment/runtime expectations
+
+## Changelog (required)
+Maintain `changelog.md`:
+- Append an entry for any modification to @project-plan.md or @architecture.md.
+- Each entry includes:
+  - Date (YYYY-MM-DD)
+  - What changed (1–5 bullets)
+  - Why (brief)
+  - Impact (what behavior changed / migration required)
+
+## Default stack (unless explicitly changed in @project-plan.md)
+- Python 3.11+
+- FastAPI (read-only API)
+- Worker service for ingestion/scheduling (polling first)
+- Postgres (Docker)
+- SQLAlchemy 2.x + Alembic migrations
+- Pydantic settings via env vars
+- Docker Compose for local orchestration
+- Next.js UI later (charts allowed; no manual TA focus)
+
+## Verification expectations
+Every milestone implementation should include:
+- exact commands to run
+- expected service health signals
+- at least one “happy path” query (curl or equivalent)
+- common failure mode notes (missing env vars, DB not up, API rate limits)

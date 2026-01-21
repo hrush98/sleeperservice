@@ -1,0 +1,57 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: polymarket
+      POSTGRES_PASSWORD: polymarket
+      POSTGRES_DB: polymarket
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U polymarket -d polymarket"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    build:
+      context: ..
+      dockerfile: services/api/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg2://polymarket:polymarket@postgres:5432/polymarket
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["/bin/sh", "-c", "alembic -c /app/alembic.ini upgrade head"]
+    restart: "no"
+
+  api:
+    build:
+      context: ..
+      dockerfile: services/api/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg2://polymarket:polymarket@postgres:5432/polymarket
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+  worker:
+    build:
+      context: ..
+      dockerfile: services/worker/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg2://polymarket:polymarket@postgres:5432/polymarket
+      POLYMARKET_BASE_URL: https://gamma-api.polymarket.com
+      WORKER_POLL_INTERVAL_SECONDS: 300
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+
+volumes:
+  pgdata:
