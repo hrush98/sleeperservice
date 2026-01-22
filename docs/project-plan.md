@@ -1,25 +1,26 @@
-# Prediction Market Intelligence Engine
-Master project plan (v0)
+# LoL Lead–Lag Arbitrage Bot
+Master project plan (v1)
 
 ## Vision
-Build a system that helps discover, understand, and analyze prediction markets—starting with **Polymarket**—and evolve into a robust intelligence + analytics engine, with an optional path to automated execution.
+Build a system that detects and exploits short-lived **lead–lag** inefficiencies between a fast external reference line and slower-to-reprice **Polymarket LoL** markets—starting as an intelligence + measurement engine, with a gated path to automated execution.
 
 The system’s advantage comes from:
-- **structured market understanding** (rules, settlement, timing)
-- **high-quality data capture** (time series + metadata + raw payload preservation)
-- **repeatable evaluation** (so iteration is grounded)
-- later: **cross-market reasoning** and **segment-specific forecasting**
+- **reference speed**: Pinnacle odds via OddsPapi (polling; see OddsPapi docs)
+- **target lag**: Polymarket CLOB order books that can remain stale for a brief window
+- **measurement discipline**: empirical lag distributions + fillability metrics before any live execution
 
 ## User-facing concept
-- A “radar” for markets: discover new markets, spot meaningful changes, compare related markets.
-- Analytics that explain *why* something is interesting (liquidity, rule clarity, movement, disagreement).
-- Charts are allowed; the goal is to avoid manual TA as the primary edge.
+- A **disagreement monitor** for live LoL matches: “Pinnacle moved; Polymarket hasn’t (yet).”
+- Analytics that explain *why* an edge is (or isn’t) actionable: lag, spread, fees, depth, slippage, delay constraints.
+- Charts are allowed; the goal is measurement + execution-readiness, not manual TA.
 
 ## Initial scope
-- Ingest Polymarket public market data into a canonical store.
-- Maintain append-only snapshots for price/probability-like fields and activity proxies.
-- Provide a read-only API for querying markets and recent history.
-- Add explainable ranking signals (quality, movement, novelty), then improve with evaluation.
+- Ingest **Polymarket LoL** market metadata + CLOB order book snapshots (or best-bid/ask + depth summaries).
+- Ingest **Pinnacle odds** (via OddsPapi) as the external reference; store raw payloads.
+- Maintain append-only snapshots for all time-series signals.
+- Build derived “disagreement/edge” events and a **lag profiler**.
+- Add **paper/shadow execution** records (no orders sent) to validate that lag opportunities exist in live conditions.
+- Provide a read-only API for querying markets, mappings, snapshots, and disagreement events.
 
 ## Non-functional requirements
 - Local-first development via Docker Compose.
@@ -50,8 +51,8 @@ The system’s advantage comes from:
   - `build-log/`
 - `migrations/`   — Alembic (or under services/shared)
 
-## Canonical data model (v0)
-This is the baseline schema; evolve additively when possible.
+## Canonical data model (v1)
+This is the baseline schema for lead–lag measurement and (later) execution. Evolve additively when possible.
 
 ### markets
 - `id` (uuid pk)
@@ -98,55 +99,147 @@ Indexes:
 - `(outcome_id, ts desc)`
 - unique constraint candidate: `(market_id, outcome_id, ts)`
 
-### derived_metrics (can be latest-per-market or append-only)
-- `market_id` (pk/fk)
+### orderbook_snapshots (append-only; polymarket CLOB)
+Stores either full depth or a depth summary; exact schema can evolve, but must remain append-only.
+- `id` (uuid pk)
+- `market_id` (fk)
+- `outcome_id` (fk)
 - `ts` (timestamptz)
-- `quality_score` (double precision nullable)
-- `move_24h` (double precision nullable)
-- `interesting_score` (double precision nullable)
-- `components` (jsonb nullable)
+- `best_bid` (double precision nullable)
+- `best_ask` (double precision nullable)
+- `mid` (double precision nullable)
+- `bid_depth` (double precision nullable)  # e.g., within X cents; definition in raw_json
+- `ask_depth` (double precision nullable)
+- `raw_json` (jsonb)  # store full book when possible
+Indexes:
+- `(market_id, outcome_id, ts desc)`
+- unique constraint candidate: `(market_id, outcome_id, ts)`
+
+### external_matches (OddsPapi fixture / Pinnacle reference entity)
+- `id` (uuid pk)
+- `source` (text; e.g. "oddspapi_pinnacle")
+- `external_match_id` (text; unique with source)
+- `league` (text nullable)   # e.g., LCK/LPL
+- `start_time` (timestamptz nullable)
+- `team_a` (text)
+- `team_b` (text)
+- `raw_json` (jsonb)
+- `created_at`
+
+### external_odds_snapshots (append-only; reference time series)
+- `id` (uuid pk)
+- `external_match_id` (fk → external_matches.id)
+- `ts` (timestamptz)
+- `market_type` (text)       # match_winner, map_winner, etc.
+- `selection` (text)         # team_a/team_b or normalized name
+- `odds_decimal` (double precision nullable)
+- `odds_american` (integer nullable)
+- `implied_prob` (double precision nullable)     # post de-vig if applicable; definition in raw_json
+- `raw_json` (jsonb)
+Indexes:
+- `(external_match_id, ts desc)`
+- unique constraint candidate: `(external_match_id, market_type, selection, ts)`
+
+### external_polymarket_mappings (critical correctness surface)
+Mapping between reference events and Polymarket markets/outcomes.
+- `id` (uuid pk)
+- `source` (text; e.g. "oddspapi_pinnacle")
+- `external_match_id` (fk → external_matches.id)
+- `polymarket_market_id` (fk → markets.id)
+- `polymarket_outcome_id` (fk → outcomes.id nullable)  # nullable for market-level mapping
+- `mapping_confidence` (double precision nullable)
+- `mapping_method` (text)  # manual, heuristic, hybrid
+- `raw_json` (jsonb nullable)
+- `created_at`, `updated_at`
+Constraints:
+- unique constraint candidate: `(source, external_match_id, polymarket_market_id, polymarket_outcome_id)`
+
+### shadow_orders (paper/shadow execution; append-only)
+Records “what we would have sent” without actually placing orders on Polymarket.
+- `id` (uuid pk)
+- `ts` (timestamptz)  # decision timestamp
+- `external_match_id` (fk → external_matches.id)
+- `polymarket_market_id` (fk → markets.id)
+- `polymarket_outcome_id` (fk → outcomes.id)
+- `side` (text)       # buy/sell
+- `price` (double precision nullable)  # chosen limit price (if applicable)
+- `size` (double precision nullable)   # chosen size (if applicable)
+- `reason` (text)     # e.g. "lag_gap_threshold", "reprice_detected"
+- `raw_json` (jsonb)  # full decision context: observed snapshots, thresholds, computed lag/edge, etc.
+Indexes:
+- `(polymarket_market_id, ts desc)`
+- `(external_match_id, ts desc)`
+
+### disagreement_events (derived; append-only)
+Derived events where the reference implies a materially different probability than the Polymarket book.
+- `id` (uuid pk)
+- `ts` (timestamptz)
+- `external_match_id` (fk → external_matches.id)
+- `polymarket_market_id` (fk → markets.id)
+- `polymarket_outcome_id` (fk → outcomes.id)
+- `ref_implied_prob` (double precision)
+- `poly_mid` (double precision nullable)
+- `poly_best_bid` (double precision nullable)
+- `poly_best_ask` (double precision nullable)
+- `gap` (double precision)         # ref_implied_prob - poly_mid (or chosen comparator)
+- `edge` (double precision)        # gap adjusted for fees/spread/slippage/delay penalty; definition in raw_json
+- `raw_json` (jsonb)
+Indexes:
+- `(polymarket_market_id, ts desc)`
+- `(external_match_id, ts desc)`
 
 ## Milestones (high level)
-### M0 — Project skeleton
+### M0 — Project skeleton **(complete)**
 - Compose setup, shared settings, DB + migrations, service scaffolds.
 
-### M1 — Polymarket ingestion + read-only API
-- Poll markets endpoint.
-- Upsert markets/outcomes/settlement spec (best-effort).
-- Append quote snapshots.
-- Serve via API (market list/detail + recent quotes).
+### M1 — Polymarket LoL ingestion + read-only API **(complete)**
+- Discover and track relevant LoL markets (LCK/LPL; match winner + map winner).
+- Ingest market metadata + quote snapshots (polling Gamma `/markets`; order book snapshots are a later upgrade).
+- Upsert markets/outcomes/settlement_specs; append quote_snapshots (append-only).
+- Serve via API (market list/detail + recent book/snapshots).
 
-### M2 — Basic analytics + ranking signals
-- Compute explainable: quality/movement/interesting scores.
-- Materialize derived_metrics for fast querying.
+### M2 — Reference ingestion (OddsPapi → Pinnacle) **(complete)**
+- Add OddsPapi adapter and ingest external_matches + external_odds_snapshots (append-only).
+- Store raw payloads and normalize odds/probabilities (including de-vig conventions when applicable).
+- Goal: live reference feed for a real match with stable timestamps and dedupe.
 
-### M3 — Evaluation + reliability
-- Scheduled evaluation reports: ranking quality, data completeness, ingestion health.
-- Logging + error handling improvements.
+### M3 — Mapping + disagreement monitor + lag profiling + shadow execution (measurement first) **(complete)**
+- Build mapping between OddsPapi fixtures (Pinnacle) and Polymarket markets/outcomes.
+- Run Polymarket + reference ingestion concurrently; compute disagreement metrics continuously.
+- Emit disagreement_events with gap/edge metrics.
+- Detect “reference move” events and measure time-to-reprice on Polymarket (lag distributions).
+- Record shadow_orders (paper decisions) when lag/edge thresholds are met (no orders sent).
+- Measure “fillability” proxies from book dynamics (spread, depth, churn, ghost liquidity signals).
 
-### M4 — Enrichment and better market understanding
-- Better settlement parsing, rule clarity heuristics.
-- Optional: news/context linking.
+### M4 — Evaluation + reliability (arbitrage-specific)
+- Scheduled evaluation reports: ingestion health, mapping accuracy, lag stability, edge hit-rate under conservative assumptions.
+- Backtest/simulate with explicit costs and delay constraints.
 
-### M5 — Cross-market matching and disagreement
-- Match related markets within Polymarket and/or across platforms.
-- Disagreement feed.
+### M5 — Optional execution simulation layer (gated)
+- Shadow decisions / paper execution records (no capital at risk).
+- Execution constraints modeled explicitly (Polymarket sports delay, IOC/marketable limits).
 
-### M6 — Optional execution simulation layer
-- Paper decisions / shadow book.
-- Structured decision records (for later learning), without turning into a trade diary.
+### M6+ — Optional live execution (only after measurement gate)
+- Conservative automation with strict limits, circuit breakers, and auditability.
+- Expand leagues/market types only after mapping + lag/edge stability.
 
-### M7+ — Segment specialization
-- Pick a segment (macro/AI/geopolitics) and build exogenous forecasting or specialized intelligence, integrated into the engine.
+## Measurement-first gate (non-negotiable)
+Live execution is gated on empirical evidence:
+- **Lag distributions**: quantiles of repricing lag by league/market type/state; stable across samples.
+- **Fillability metrics**: spread/depth/churn/queue position proxies; conservative slippage model validated vs observed prints/fills (when available).
+- **Mapping correctness**: quantified error rate and audit trail; no “best guess” mappings in automated mode.
+- **Cost model**: fees + spread + expected slippage + delay penalty; edge must remain positive under worst-case bands.
 
 ## Operational guidelines
 - Prefer “one vertical slice working” over multiple unfinished modules.
+- When a milestone is completed, mark it as **(complete)** next to the milestone heading in this document.
 - Every milestone ends with:
   - verification commands
   - data sanity checks
   - a small ADR if a meaningful decision was made
 
 ## Open decisions (to revisit)
+- OddsPapi integration details: polling cadence vs “spike polling” after a move; rate-limit strategy; fixture/market normalization.
+- Canonical representation for order book depth (full depth vs summary) and storage cost controls.
+- Mapping workflow: manual curation tool vs human-in-the-loop heuristics.
 - When/if to add a UI (Next.js) and what endpoints it needs.
-- Suggested cadence: snapshot interval, backfill policies.
-- Whether to add a second platform after M3 vs deeper Polymarket data.
