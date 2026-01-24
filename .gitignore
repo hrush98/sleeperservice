@@ -1,0 +1,23 @@
+# Python cache / bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+# Environment files
+.env
+.env.*
+
+# Cursor / editor tooling
+.cursor/
+
+# OS / editor junk
+.DS_Store
+.vscode/
+.idea/
+
+# Python virtual envs
+.venv/
+venv/
+env/
+
+# Migrations bytecode
+migrations/**/__pycache__/
