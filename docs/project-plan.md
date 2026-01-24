@@ -1,245 +1,242 @@
 # LoL Lead–Lag Arbitrage Bot
-Master project plan (v1)
+Master project plan (v2 — simplified MVP)
 
 ## Vision
-Build a system that detects and exploits short-lived **lead–lag** inefficiencies between a fast external reference line and slower-to-reprice **Polymarket LoL** markets—starting as an intelligence + measurement engine, with a gated path to automated execution.
+Detect and exploit short-lived **lead–lag** inefficiencies between Pinnacle odds (via OddsPapi) and Polymarket LoL CLOB markets. Start with paper trading; gate live execution on measured edge.
 
-The system’s advantage comes from:
-- **reference speed**: Pinnacle odds via OddsPapi (polling; see OddsPapi docs)
-- **target lag**: Polymarket CLOB order books that can remain stale for a brief window
-- **measurement discipline**: empirical lag distributions + fillability metrics before any live execution
+## Core insight
+Pinnacle reprices faster than Polymarket. When Pinnacle moves, there's a brief window where Polymarket is stale. We detect that window, measure it, and (later) trade it.
 
-## User-facing concept
-- A **disagreement monitor** for live LoL matches: “Pinnacle moved; Polymarket hasn’t (yet).”
-- Analytics that explain *why* an edge is (or isn’t) actionable: lag, spread, fees, depth, slippage, delay constraints.
-- Charts are allowed; the goal is measurement + execution-readiness, not manual TA.
+## Design principles (MVP)
+- **Two separate modes**: Discovery (on-demand CLI) vs Live Monitor (runs during matches)
+- **No broad discovery**: Only ingest LoL matches from top 5 leagues
+- **Minimal storage**: Only what's needed for mapping + live comparison
+- **Clear observability**: Know exactly what's happening at each step
 
-## Initial scope
-- Ingest **Polymarket LoL** market metadata + CLOB order book snapshots (or best-bid/ask + depth summaries).
-- Ingest **Pinnacle odds** (via OddsPapi) as the external reference; store raw payloads.
-- Maintain append-only snapshots for all time-series signals.
-- Build derived “disagreement/edge” events and a **lag profiler**.
-- Add **paper/shadow execution** records (no orders sent) to validate that lag opportunities exist in live conditions.
-- Provide a read-only API for querying markets, mappings, snapshots, and disagreement events.
+---
 
-## Non-functional requirements
-- Local-first development via Docker Compose.
-- Idempotent ingestion, robust to restarts and partial failures.
-- Data model supports history (no silent overwrites of time series).
-- “Raw payload” preservation to avoid losing platform-specific nuance.
-- Documentation suitable for interviews (decisions, tradeoffs, evolution).
+## System modes
 
-## Tech stack (default)
-- Python 3.11+
-- FastAPI for API
-- Worker service for ingestion + periodic jobs
-- Postgres for storage
-- SQLAlchemy 2.x + Alembic migrations
-- Pydantic settings (env-driven)
-- Docker Compose
-- Next.js UI later (optional early; backend-first priority)
+### Mode 1: Discovery CLI (on-demand)
+Run manually to collect upcoming matches for the next N days. Not always running.
 
-## Repository layout (target)
-- `services/`
-  - `api/`        — FastAPI app (read-only)
-  - `worker/`     — poller + schedulers + analytics jobs
-  - `shared/`     — DB models, settings, utilities, canonical types
-- `infra/`        — docker-compose, local scripts
-- `docs/`
-  - `adr/`
-  - `evals/`
-  - `build-log/`
-- `migrations/`   — Alembic (or under services/shared)
+**OddsPapi flow:**
+1. `GET /v4/tournaments?sportId=18` → get tournament IDs for LCK, LPL, LEC, LCS/LTA, LCP
+2. `GET /v4/participants?sportId=18` → cache team ID → name mappings
+3. `GET /v4/fixtures?tournamentId=X&from=...&to=...&hasOdds=true` → get upcoming fixtures
+4. Store: leagues, teams, fixtures
 
-## Canonical data model (v1)
-This is the baseline schema for lead–lag measurement and (later) execution. Evolve additively when possible.
+**Polymarket flow:**
+1. `GET /sports` → find `sport="lol"` entry (series=10311). Note: "lcs" = soccer Leagues Cup, "lpl" = cricket!
+2. `GET /teams?league=lol` → cache team mappings
+3. `GET /events?series_id=10311&tag_id=100639&closed=false` → get open (unresolved) LoL events
+4. Store: leagues, teams, events/markets
+   - Only keep **match winner (moneyline)** and **game winner** markets (Game 1/2/3)
+   - Persist market metadata needed to distinguish **match vs game** and **game number**
 
-### markets
+**Mapping:**
+- Each OddsPapi fixture ↔ multiple Polymarket markets:
+  - **Match winner (moneyline)**
+  - **Game winner** for Game 1/2/3 (if offered)
+- Match by: league + team names + date (not exact time)
+- Store mapping with confidence score + market_type/game_number
+
+**CLI interface:**
+```
+$ python -m cli discover --days 7
+Collecting matches for next 7 days...
+OddsPapi: Found 12 fixtures across 5 leagues
+Polymarket: Found 8 events with markets
+Mappings created: 6 (high confidence), 2 (review needed)
+```
+
+### Mode 2: Live Monitor (during matches)
+Runs when mapped matches go live. Compares odds in real-time.
+
+**For each live mapped match:**
+1. Poll OddsPapi `/v4/odds?fixtureId=X` for Pinnacle prices
+2. Extract **moneyline** and **game winner** (Game 1/2/3) prices
+3. Poll Polymarket CLOB orderbook for the corresponding market(s)
+4. Compute gap per market: `pinnacle_implied_prob - polymarket_mid`
+5. If gap exceeds threshold → record shadow order
+6. Log everything for later analysis
+
+**Output:**
+- Console logs showing live comparison
+- Shadow orders stored in DB
+- Simple `/ops/live` endpoint showing current state
+
+---
+
+## Target leagues (top 5 LoL)
+- **LCK** (South Korea) — strongest region
+- **LPL** (China) — strongest region
+- **LEC** (Europe)
+- **LCS/LTA** (North America)
+- **LCP** (Asia-Pacific)
+
+OddsPapi sportId for LoL: **18**
+
+---
+
+## Data model (minimal)
+
+### leagues
 - `id` (uuid pk)
-- `platform` (text; "polymarket")
-- `platform_market_id` (text; unique with platform)
-- `title` (text)
-- `description` (text nullable)
-- `url` (text nullable)
-- `status` (text; best-effort)
-- `open_time` (timestamptz nullable)
-- `close_time` (timestamptz nullable)
+- `source` (text; "oddspapi" | "polymarket")
+- `source_id` (text; tournament_id or series_id)
+- `name` (text)
+- `slug` (text)
 - `raw_json` (jsonb)
 - `created_at`, `updated_at`
 
-### outcomes
+### teams
 - `id` (uuid pk)
-- `market_id` (fk)
-- `outcome_name` (text)
-- `platform_outcome_id` (text nullable)
-- `created_at`
-
-### settlement_specs
-Captures settlement semantics and protects against silent rule drift.
-- `id` (uuid pk)
-- `market_id` (fk)
-- `source` (text nullable)
-- `resolution_time` (timestamptz nullable)
-- `criteria_text` (text nullable)
-- `spec_version_hash` (text)  # derived from normalized fields + raw rule text
-- `raw_json` (jsonb nullable)
-- `created_at`
-
-### quote_snapshots (append-only)
-- `id` (uuid pk)
-- `market_id` (fk)
-- `outcome_id` (fk nullable)
-- `ts` (timestamptz)
-- `price` (double precision)
-- `volume_24h` (double precision nullable)
-- `liquidity` (double precision nullable)
+- `source` (text)
+- `source_id` (text; participant_id or team_id)
+- `league_id` (fk → leagues.id nullable)
+- `name` (text)
+- `abbreviation` (text nullable)
 - `raw_json` (jsonb)
-Indexes:
-- `(market_id, ts desc)`
-- `(outcome_id, ts desc)`
-- unique constraint candidate: `(market_id, outcome_id, ts)`
+- `created_at`
 
-### orderbook_snapshots (append-only; polymarket CLOB)
-Stores either full depth or a depth summary; exact schema can evolve, but must remain append-only.
+### fixtures
 - `id` (uuid pk)
-- `market_id` (fk)
-- `outcome_id` (fk)
+- `source` (text; "oddspapi" | "polymarket")
+- `source_id` (text; fixture_id or event_id/market_id)
+- `league_id` (fk → leagues.id)
+- `team_a_id` (fk → teams.id)
+- `team_b_id` (fk → teams.id)
+- `start_time` (timestamptz)
+- `status` (text; "upcoming" | "live" | "finished")
+- `has_odds` (boolean)
+- `market_type` (text; "match_winner" | "game_winner")
+- `game_number` (int nullable; 1/2/3 for game winner markets)
+- `raw_json` (jsonb)
+- `created_at`, `updated_at`
+
+### mappings
+- `id` (uuid pk)
+- `oddspapi_fixture_id` (fk → fixtures.id)
+- `polymarket_fixture_id` (fk → fixtures.id)
+- `confidence` (double precision)
+- `method` (text; "auto" | "manual")
+- `match_details` (jsonb; what matched: league, teams, date)
+- `created_at`, `updated_at`
+
+### odds_snapshots (append-only)
+- `id` (uuid pk)
+- `fixture_id` (fk → fixtures.id)
 - `ts` (timestamptz)
+- `source` (text; "oddspapi" | "polymarket_clob")
+- `team_a_odds` (double precision nullable)
+- `team_b_odds` (double precision nullable)
+- `team_a_implied_prob` (double precision nullable)
+- `team_b_implied_prob` (double precision nullable)
 - `best_bid` (double precision nullable)
 - `best_ask` (double precision nullable)
-- `mid` (double precision nullable)
-- `bid_depth` (double precision nullable)  # e.g., within X cents; definition in raw_json
-- `ask_depth` (double precision nullable)
-- `raw_json` (jsonb)  # store full book when possible
-Indexes:
-- `(market_id, outcome_id, ts desc)`
-- unique constraint candidate: `(market_id, outcome_id, ts)`
-
-### external_matches (OddsPapi fixture / Pinnacle reference entity)
-- `id` (uuid pk)
-- `source` (text; e.g. "oddspapi_pinnacle")
-- `external_match_id` (text; unique with source)
-- `league` (text nullable)   # e.g., LCK/LPL
-- `start_time` (timestamptz nullable)
-- `team_a` (text)
-- `team_b` (text)
 - `raw_json` (jsonb)
-- `created_at`
 
-### external_odds_snapshots (append-only; reference time series)
+### shadow_orders (append-only)
 - `id` (uuid pk)
-- `external_match_id` (fk → external_matches.id)
+- `mapping_id` (fk → mappings.id)
 - `ts` (timestamptz)
-- `market_type` (text)       # match_winner, map_winner, etc.
-- `selection` (text)         # team_a/team_b or normalized name
-- `odds_decimal` (double precision nullable)
-- `odds_american` (integer nullable)
-- `implied_prob` (double precision nullable)     # post de-vig if applicable; definition in raw_json
+- `side` (text; "buy_a" | "buy_b")
+- `pinnacle_prob` (double precision)
+- `polymarket_price` (double precision)
+- `gap` (double precision)
+- `reason` (text)
 - `raw_json` (jsonb)
-Indexes:
-- `(external_match_id, ts desc)`
-- unique constraint candidate: `(external_match_id, market_type, selection, ts)`
 
-### external_polymarket_mappings (critical correctness surface)
-Mapping between reference events and Polymarket markets/outcomes.
-- `id` (uuid pk)
-- `source` (text; e.g. "oddspapi_pinnacle")
-- `external_match_id` (fk → external_matches.id)
-- `polymarket_market_id` (fk → markets.id)
-- `polymarket_outcome_id` (fk → outcomes.id nullable)  # nullable for market-level mapping
-- `mapping_confidence` (double precision nullable)
-- `mapping_method` (text)  # manual, heuristic, hybrid
-- `raw_json` (jsonb nullable)
-- `created_at`, `updated_at`
-Constraints:
-- unique constraint candidate: `(source, external_match_id, polymarket_market_id, polymarket_outcome_id)`
+---
 
-### shadow_orders (paper/shadow execution; append-only)
-Records “what we would have sent” without actually placing orders on Polymarket.
-- `id` (uuid pk)
-- `ts` (timestamptz)  # decision timestamp
-- `external_match_id` (fk → external_matches.id)
-- `polymarket_market_id` (fk → markets.id)
-- `polymarket_outcome_id` (fk → outcomes.id)
-- `side` (text)       # buy/sell
-- `price` (double precision nullable)  # chosen limit price (if applicable)
-- `size` (double precision nullable)   # chosen size (if applicable)
-- `reason` (text)     # e.g. "lag_gap_threshold", "reprice_detected"
-- `raw_json` (jsonb)  # full decision context: observed snapshots, thresholds, computed lag/edge, etc.
-Indexes:
-- `(polymarket_market_id, ts desc)`
-- `(external_match_id, ts desc)`
+## Milestones
 
-### disagreement_events (derived; append-only)
-Derived events where the reference implies a materially different probability than the Polymarket book.
-- `id` (uuid pk)
-- `ts` (timestamptz)
-- `external_match_id` (fk → external_matches.id)
-- `polymarket_market_id` (fk → markets.id)
-- `polymarket_outcome_id` (fk → outcomes.id)
-- `ref_implied_prob` (double precision)
-- `poly_mid` (double precision nullable)
-- `poly_best_bid` (double precision nullable)
-- `poly_best_ask` (double precision nullable)
-- `gap` (double precision)         # ref_implied_prob - poly_mid (or chosen comparator)
-- `edge` (double precision)        # gap adjusted for fees/spread/slippage/delay penalty; definition in raw_json
-- `raw_json` (jsonb)
-Indexes:
-- `(polymarket_market_id, ts desc)`
-- `(external_match_id, ts desc)`
-
-## Milestones (high level)
 ### M0 — Project skeleton **(complete)**
 - Compose setup, shared settings, DB + migrations, service scaffolds.
 
-### M1 — Polymarket LoL ingestion + read-only API **(complete)**
-- Discover and track relevant LoL markets (LCK/LPL; match winner + map winner).
-- Ingest market metadata + quote snapshots (polling Gamma `/markets`; order book snapshots are a later upgrade).
-- Upsert markets/outcomes/settlement_specs; append quote_snapshots (append-only).
-- Serve via API (market list/detail + recent book/snapshots).
+### M1 — Discovery CLI **(complete)**
+- Implement OddsPapi client: tournaments, participants, fixtures
+- Implement Polymarket client: sports, teams, events
+- Build mapping logic (league + teams + date)
+- CLI: `discover --days N`
+- Verification: See leagues, teams, fixtures, mappings in DB
 
-### M2 — Reference ingestion (OddsPapi → Pinnacle) **(complete)**
-- Add OddsPapi adapter and ingest external_matches + external_odds_snapshots (append-only).
-- Store raw payloads and normalize odds/probabilities (including de-vig conventions when applicable).
-- Goal: live reference feed for a real match with stable timestamps and dedupe.
+### M2 — Live Monitor (basic)
+- Implement OddsPapi odds polling
+- Implement Polymarket CLOB polling
+- Compare and compute gap
+- Record shadow orders
+- CLI: `monitor` (watches live matches)
 
-### M3 — Mapping + disagreement monitor + lag profiling + shadow execution (measurement first) **(complete)**
-- Build mapping between OddsPapi fixtures (Pinnacle) and Polymarket markets/outcomes.
-- Run Polymarket + reference ingestion concurrently; compute disagreement metrics continuously.
-- Emit disagreement_events with gap/edge metrics.
-- Detect “reference move” events and measure time-to-reprice on Polymarket (lag distributions).
-- Record shadow_orders (paper decisions) when lag/edge thresholds are met (no orders sent).
-- Measure “fillability” proxies from book dynamics (spread, depth, churn, ghost liquidity signals).
+### M3 — Observability
+- `/ops/status` endpoint (counts, last update times)
+- `/ops/live` endpoint (current live matches + latest gaps)
+- Console output that makes sense
 
-### M4 — Evaluation + reliability (arbitrage-specific)
-- Scheduled evaluation reports: ingestion health, mapping accuracy, lag stability, edge hit-rate under conservative assumptions.
-- Backtest/simulate with explicit costs and delay constraints.
+### M4 — Evaluation
+- Review shadow orders vs actual price movements
+- Measure lag distributions
+- Decide if edge is real
 
-### M5 — Optional execution simulation layer (gated)
-- Shadow decisions / paper execution records (no capital at risk).
-- Execution constraints modeled explicitly (Polymarket sports delay, IOC/marketable limits).
+### M5+ — Execution (gated)
+- Only after M4 shows consistent edge
+- Conservative limits, circuit breakers
 
-### M6+ — Optional live execution (only after measurement gate)
-- Conservative automation with strict limits, circuit breakers, and auditability.
-- Expand leagues/market types only after mapping + lag/edge stability.
+---
 
-## Measurement-first gate (non-negotiable)
-Live execution is gated on empirical evidence:
-- **Lag distributions**: quantiles of repricing lag by league/market type/state; stable across samples.
-- **Fillability metrics**: spread/depth/churn/queue position proxies; conservative slippage model validated vs observed prints/fills (when available).
-- **Mapping correctness**: quantified error rate and audit trail; no “best guess” mappings in automated mode.
-- **Cost model**: fees + spread + expected slippage + delay penalty; edge must remain positive under worst-case bands.
+## Tech stack
+- Python 3.11+
+- Typer for CLI
+- FastAPI for API (minimal, observability only)
+- Postgres + SQLAlchemy 2.x + Alembic
+- Docker Compose for local dev
+- No UI needed for MVP
 
-## Operational guidelines
-- Prefer “one vertical slice working” over multiple unfinished modules.
-- When a milestone is completed, mark it as **(complete)** next to the milestone heading in this document.
-- Every milestone ends with:
-  - verification commands
-  - data sanity checks
-  - a small ADR if a meaningful decision was made
+## Repository layout
+```
+services/
+  cli/           — Typer CLI (discover, monitor commands)
+  api/           — FastAPI (ops endpoints only)
+  shared/        — DB models, settings, clients
+infra/
+  docker-compose.yml
+docs/
+  project-plan.md
+  architecture.md
+  changelog.md
+  oddspapi-guide.md
+  polymarket-guide.md
+migrations/
+```
 
-## Open decisions (to revisit)
-- OddsPapi integration details: polling cadence vs “spike polling” after a move; rate-limit strategy; fixture/market normalization.
-- Canonical representation for order book depth (full depth vs summary) and storage cost controls.
-- Mapping workflow: manual curation tool vs human-in-the-loop heuristics.
-- When/if to add a UI (Next.js) and what endpoints it needs.
+---
+
+## Verification (how to know it works)
+
+### Discovery
+```bash
+python -m cli discover --days 7
+# Should output: leagues found, teams cached, fixtures found, mappings created
+```
+
+### Live Monitor
+```bash
+python -m cli monitor
+# Should output: watching N live matches, gap updates every X seconds
+```
+
+### API
+```bash
+curl http://localhost:8000/ops/status
+# Should show: fixture count, mapping count, last discovery time, live match count
+```
+
+---
+
+## What we're NOT doing (MVP scope control)
+- No broad market discovery (only LoL top 5 leagues)
+- No always-running worker polling everything
+- No complex settlement specs or quote snapshots for non-live matches
+- No UI
+- No actual order placement

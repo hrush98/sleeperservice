@@ -1,101 +1,220 @@
 # Architecture
-LoL Lead–Lag Arbitrage Bot (v1)
+LoL Lead–Lag Arbitrage Bot (v2 — simplified MVP)
 
 ## Overview
-The system is split into:
-- **Worker**: ingestion + event-driven analytics (lag/edge) + (later) execution
-- **API**: read-only query layer
-- **Postgres**: canonical storage for metadata + time series + raw payloads
-- (Later) **UI**: Next.js consuming API
+Two-mode system for detecting lead–lag inefficiencies between Pinnacle (via OddsPapi) and Polymarket LoL markets.
 
-## Component diagram (logical)
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         USER (CLI)                              │
+│  $ cli discover --days 7    │    $ cli monitor                  │
+└──────────────┬──────────────┴──────────────┬────────────────────┘
+               │                             │
+               v                             v
+┌──────────────────────────┐   ┌──────────────────────────────────┐
+│     DISCOVERY MODE       │   │         LIVE MONITOR MODE        │
+│  (on-demand, not live)   │   │    (runs during live matches)    │
+├──────────────────────────┤   ├──────────────────────────────────┤
+│ 1. Fetch leagues/teams   │   │ 1. Poll OddsPapi /odds           │
+│ 2. Fetch fixtures        │   │ 2. Poll Polymarket CLOB          │
+│ 3. Build mappings        │   │ 3. Compare → compute gap         │
+│                          │   │ 4. Record shadow orders          │
+└────────────┬─────────────┘   └──────────────┬───────────────────┘
+             │                                │
+             v                                v
+┌─────────────────────────────────────────────────────────────────┐
+│                          POSTGRES                               │
+│  leagues │ teams │ fixtures │ mappings │ odds_snapshots │ shadow│
+└─────────────────────────────────────────────────────────────────┘
+             ^
+             │ SQL reads (ops only)
+┌────────────┴────────────────────────────────────────────────────┐
+│                       API (minimal)                             │
+│  GET /ops/status    — counts, last update times                 │
+│  GET /ops/live      — current live matches + gaps               │
+└─────────────────────────────────────────────────────────────────┘
+```
 
-+----------------------------+        +----------------------------+
-| OddsPapi (Pinnacle odds)   |        | Polymarket CLOB + metadata |
-| - odds / line moves        |        | - markets endpoint (HTTP)  |
-| - fixture metadata         |        | - order books (WS)         |
-+-------------+--------------+        +--------------+-------------+
-              |                                      |
-              | HTTP (polling)                       | WS + HTTP
-              v                                      v
-+------------------------------------------------------------------+
-|                               WORKER                             |
-| - adapter: oddspapi (pinnacle reference)                          |
-| - adapter: polymarket gamma (market discovery + quote snapshots)  |
-| - mapping resolver (external match → polymarket market/outcome)  |
-| - lag profiler (reference move → polymarket repricing)           |
-| - edge calculator (gap – spread – fees – slippage – delay pen.)  |
-| - shadow execution recorder (paper orders; no live placement)     |
-| - (later) execution module (marketable limit / IOC-like)         |
-+---------------------------+--------------------------------------+
-                            |
-                            | SQL writes (append-only where relevant)
-                            v
-+------------------------------------------------------------------+
-|                              POSTGRES                            |
-| - polymarket: markets/outcomes/settlement_specs                   |
-| - polymarket time series: quote_snapshots (now), orderbook_snapshots (later) |
-| - reference: external_matches, external_odds_snapshots            |
-| - mapping: external_polymarket_mappings                           |
-| - derived: disagreement_events (gap/edge metrics)                 |
-| - derived: shadow_orders (paper decisions; no live placement)      |
-| - raw_json preserved for reprocessing                             |
-+---------------------------+--------------------------------------+
-                            ^
-                            | SQL reads
-+---------------------------+--------------------------------------+
-|                                API                               |
-| FastAPI (read-only):                                             |
-| - list markets/matches/mappings                                  |
-| - recent order books + odds snapshots                             |
-| - disagreement events + lag metrics                               |
-+---------------------------+--------------------------------------+
-                            |
-                            | HTTP JSON
-                            v
-+------------------------------------------------------------------+
-|                      (Later) Next.js UI                          |
-| - monitoring dashboards + mapping review                          |
-| - charts for lag/edge + fillability metrics                        |
-+------------------------------------------------------------------+
+---
 
-## Data flow
-1) Worker ingests **reference odds** from OddsPapi (Pinnacle) (polling), writing:
-   - external_matches (upsert by source + external_match_id)
-   - external_odds_snapshots (append-only)
-2) Worker ingests **Polymarket** market metadata + quotes from Gamma (HTTP polling), writing:
-   - markets/outcomes/settlement_specs (idempotent upserts)
-   - quote_snapshots (append-only)
-3) Worker maintains **mapping** between external_matches and Polymarket markets/outcomes.
-4) Worker emits **disagreement_events** when reference implied probability materially differs from Polymarket book.
-5) Worker computes **lag profiles** and **fillability proxies** (derived analytics; stored as needed).
-6) Worker records **shadow execution** decisions (paper orders) for measurement and replay.
-7) API serves read-only queries for monitoring and evaluation.
+## Mode 1: Discovery (CLI)
 
-## Interfaces and contracts
+**Purpose:** Collect upcoming LoL matches and build mappings between OddsPapi and Polymarket.
 
-### Worker → DB
-- Upsert polymarket entities by `(platform, platform_market_id)` and `(market_id, outcome_name/platform_outcome_id)`.
-- Upsert external matches by `(source, external_match_id)`.
-- Append snapshots (orderbook_snapshots, external_odds_snapshots, quote_snapshots); avoid exact duplicates with uniqueness rules on natural keys including `(…, ts)`.
-- Treat mappings as high-integrity records: require provenance (method/confidence/raw_json) and be audit-friendly.
+**When to run:** On-demand, before matches start. E.g., once per day or week.
 
-### API → DB
-- Read-only queries; endpoints should be stable and pagination-first.
+### OddsPapi flow
+```
+/v4/tournaments?sportId=18
+    → Filter to: LCK, LPL, LEC, LCS, LCP
+    → Store in: leagues table
 
-## Reliability & correctness expectations
-- Worker must be restart-safe (idempotent upserts).
-- Partial failures should not corrupt state:
-  - if snapshot insertion fails, market upserts may still succeed.
-- Store `raw_json` to allow reprocessing if schema changes.
-- Mapping correctness is a first-class risk:
-  - prefer conservative behavior over “best guess” auto-matches
-  - automated decisions must only use mappings above a configured confidence threshold
+/v4/participants?sportId=18
+    → Store in: teams table (participantId → name)
 
-## Extension points (future)
-- Additional leagues/market types (beyond LCK/LPL; match winner + map winner).
-- Additional reference sources (secondary books) to cross-check Pinnacle and improve robustness.
-- Execution module inside worker (marketable limit / IOC-like), gated by measurement-first criteria:
-  - empirical lag distributions
-  - fillability metrics and conservative cost model
-  - stable mapping accuracy
+/v4/fixtures?tournamentId=X&from=...&to=...&hasOdds=true
+    → Store in: fixtures table
+```
+
+### Polymarket flow
+```
+/sports
+    → Filter to LoL leagues (series_id)
+    → Store in: leagues table
+
+/teams?league=...
+    → Store in: teams table (teamId → name)
+
+/events?series_id=X&tag_id=100639&active=true
+    → Store in: fixtures table (event + market data)
+    → Keep only match winner (moneyline) and game winner markets (Game 1/2/3)
+```
+
+### Mapping logic
+For each OddsPapi fixture, find matching Polymarket markets by:
+1. **League match:** normalized league name
+2. **Team match:** both team names appear (fuzzy)
+3. **Date match:** same calendar date (ignore exact time)
+
+Store mapping with confidence score plus market type and game number.
+
+---
+
+## Mode 2: Live Monitor (CLI)
+
+**Purpose:** Compare live odds and detect discrepancies.
+
+**When to run:** When mapped matches are live.
+
+### Flow
+```
+For each mapping where fixture.status == "live":
+    1. GET /v4/odds?fixtureId=X (OddsPapi)
+       → Extract Pinnacle moneyline + game winner (Game 1/2/3)
+    
+    2. GET Polymarket CLOB orderbook for each market
+       → Extract best_bid, best_ask → mid price
+    
+    3. Compute gap per market = pinnacle_implied_prob - polymarket_mid
+    
+    4. If abs(gap) > threshold:
+       → Record shadow_order
+       → Log to console
+    
+    5. Store odds_snapshot (both sources)
+```
+
+### Console output (example)
+```
+[14:32:05] T1 vs Gen.G (LCK)
+           Pinnacle: T1 @ 1.45 (68.9%) | Gen.G @ 2.85 (35.1%)
+           Polymarket: T1 bid=0.65 ask=0.68 mid=0.665
+           Gap: +2.4% on T1 (below threshold)
+
+[14:32:10] T1 vs Gen.G (LCK)
+           Pinnacle: T1 @ 1.38 (72.5%) ← MOVED
+           Polymarket: T1 bid=0.65 ask=0.68 mid=0.665
+           Gap: +6.0% on T1 ⚠️ SHADOW BUY recorded
+```
+
+---
+
+## Data flow summary
+
+### Discovery
+```
+OddsPapi ──► leagues, teams, fixtures (source="oddspapi")
+Polymarket ──► leagues, teams, fixtures (source="polymarket")
+                         │
+                         v
+                    mappings (oddspapi_fixture ↔ polymarket_fixture)
+```
+
+### Live Monitor
+```
+OddsPapi /odds ──► odds_snapshots (source="oddspapi")
+Polymarket CLOB ──► odds_snapshots (source="polymarket_clob")
+                         │
+                         v (if gap > threshold)
+                    shadow_orders
+```
+
+---
+
+## Database tables (6 total)
+
+| Table | Purpose | Write mode |
+|-------|---------|------------|
+| leagues | League/tournament metadata | Upsert |
+| teams | Team/participant cache | Upsert |
+| fixtures | Upcoming/live matches + market type/number | Upsert |
+| mappings | OddsPapi ↔ Polymarket links | Upsert |
+| odds_snapshots | Live price time series | Append-only |
+| shadow_orders | Paper trade decisions | Append-only |
+
+---
+
+## API (minimal, ops only)
+
+### GET /ops/status
+```json
+{
+  "leagues": {"oddspapi": 5, "polymarket": 4},
+  "teams": {"oddspapi": 120, "polymarket": 85},
+  "fixtures": {"oddspapi": 15, "polymarket": 12},
+  "mappings": {"total": 10, "high_confidence": 8},
+  "last_discovery": "2026-01-24T10:00:00Z",
+  "live_matches": 2
+}
+```
+
+### GET /ops/live
+```json
+{
+  "matches": [
+    {
+      "mapping_id": "...",
+      "teams": "T1 vs Gen.G",
+      "league": "LCK",
+      "pinnacle_prob": 0.725,
+      "polymarket_mid": 0.665,
+      "gap": 0.06,
+      "last_update": "2026-01-24T14:32:10Z"
+    }
+  ]
+}
+```
+
+---
+
+## External API reference
+
+### OddsPapi (Pinnacle reference)
+- Base: `https://api.oddspapi.io`
+- Auth: `?apiKey=...`
+- Endpoints used:
+  - `/v4/tournaments?sportId=18` — LoL leagues
+  - `/v4/participants?sportId=18` — team names
+  - `/v4/fixtures?tournamentId=X&...` — upcoming matches
+  - `/v4/odds?fixtureId=X&bookmakers=pinnacle` — live odds
+- Cooldowns: 500ms–2000ms per endpoint
+
+### Polymarket (target)
+- Base: `https://gamma-api.polymarket.com`
+- Endpoints used:
+  - `/sports` — LoL leagues (series_id)
+  - `/teams?league=...` — team names
+  - `/events?series_id=X&tag_id=100639` — upcoming matches
+  - CLOB orderbook (separate endpoint) — live prices
+
+---
+
+## What's NOT in this architecture
+- No broad market discovery
+- No always-running background worker
+- No complex derived tables (disagreement_events, etc.)
+- No settlement specs or quote snapshots (non-live)
+- No UI
+- No actual order execution
+
+These can be added later after the MVP proves the edge exists.
