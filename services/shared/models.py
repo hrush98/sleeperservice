@@ -98,6 +98,10 @@ class Fixture(Base):
     has_odds: Mapped[bool] = mapped_column(default=False)
     market_type: Mapped[str | None] = mapped_column(String, nullable=True)  # match_winner|game_winner
     game_number: Mapped[int | None] = mapped_column(nullable=True)  # 1/2/3 for game_winner
+    series_type: Mapped[str | None] = mapped_column(String, nullable=True)  # bo1|bo3|bo5
+    parent_fixture_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("fixtures.id"), nullable=True
+    )
     raw_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -107,6 +111,15 @@ class Fixture(Base):
     league: Mapped[League | None] = relationship("League", back_populates="fixtures")
     team_a: Mapped[Team | None] = relationship("Team", foreign_keys=[team_a_id])
     team_b: Mapped[Team | None] = relationship("Team", foreign_keys=[team_b_id])
+    parent_fixture: Mapped[Fixture | None] = relationship(
+        "Fixture",
+        remote_side="Fixture.id",
+        back_populates="child_fixtures",
+    )
+    child_fixtures: Mapped[list[Fixture]] = relationship(
+        "Fixture",
+        back_populates="parent_fixture",
+    )
     odds_snapshots: Mapped[list[OddsSnapshot]] = relationship("OddsSnapshot", back_populates="fixture")
 
     __table_args__ = (
@@ -116,6 +129,7 @@ class Fixture(Base):
         Index("ix_fixtures_start_time", "start_time"),
         Index("ix_fixtures_league_id", "league_id"),
         Index("ix_fixtures_market_type", "market_type"),
+        Index("ix_fixtures_parent_fixture_id", "parent_fixture_id"),
     )
 
 

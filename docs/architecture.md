@@ -67,16 +67,19 @@ Two-mode system for detecting lead–lag inefficiencies between Pinnacle (via Od
 
 /events?series_id=X&tag_id=100639&active=true
     → Store in: fixtures table (event + market data)
-    → Keep only match winner (moneyline) and game winner markets (Game 1/2/3)
+    → Store an **event fixture** as the parent match object
+       - Event start time is derived from the moneyline market `gameStartTime` when present
+    → Keep only match winner (moneyline) and game winner markets (Game 1/2/3/5)
+    → Link match + game markets to the parent **event** via parent_fixture_id
 ```
 
 ### Mapping logic
-For each OddsPapi fixture, find matching Polymarket markets by:
+For each OddsPapi fixture, find a matching Polymarket **event** by:
 1. **League match:** normalized league name
 2. **Team match:** both team names appear (fuzzy)
 3. **Date match:** same calendar date (ignore exact time)
 
-Store mapping with confidence score plus market type and game number.
+Store mapping with confidence score for the event; markets join via parent_fixture_id.
 
 ---
 
@@ -147,7 +150,7 @@ Polymarket CLOB ──► odds_snapshots (source="polymarket_clob")
 |-------|---------|------------|
 | leagues | League/tournament metadata | Upsert |
 | teams | Team/participant cache | Upsert |
-| fixtures | Upcoming/live matches + market type/number | Upsert |
+| fixtures | Upcoming/live matches + event/market type/number + parent | Upsert |
 | mappings | OddsPapi ↔ Polymarket links | Upsert |
 | odds_snapshots | Live price time series | Append-only |
 | shadow_orders | Paper trade decisions | Append-only |

@@ -31,15 +31,16 @@ Run manually to collect upcoming matches for the next N days. Not always running
 2. `GET /teams?league=lol` → cache team mappings
 3. `GET /events?series_id=10311&tag_id=100639&closed=false` → get open (unresolved) LoL events
 4. Store: leagues, teams, events/markets
-   - Only keep **match winner (moneyline)** and **game winner** markets (Game 1/2/3)
-   - Persist market metadata needed to distinguish **match vs game** and **game number**
+   - Store an **event fixture** (match-level parent) with league, teams, start time
+     - Event start time is derived from the moneyline market `gameStartTime` when present
+   - Only keep **match winner (moneyline)** and **game winner** markets (Game 1/2/3/5)
+   - Persist market metadata needed to distinguish **match vs game**, **game number**, and **series type**
+   - Link match + game markets to the **event** via `parent_fixture_id`
 
 **Mapping:**
-- Each OddsPapi fixture ↔ multiple Polymarket markets:
-  - **Match winner (moneyline)**
-  - **Game winner** for Game 1/2/3 (if offered)
+- Each OddsPapi fixture ↔ a Polymarket **event fixture** (parent match)
 - Match by: league + team names + date (not exact time)
-- Store mapping with confidence score + market_type/game_number
+- Match/game markets are children of the event via `parent_fixture_id`
 
 **CLI interface:**
 ```
@@ -110,8 +111,10 @@ OddsPapi sportId for LoL: **18**
 - `start_time` (timestamptz)
 - `status` (text; "upcoming" | "live" | "finished")
 - `has_odds` (boolean)
-- `market_type` (text; "match_winner" | "game_winner")
+- `market_type` (text; "event" | "match_winner" | "game_winner")
 - `game_number` (int nullable; 1/2/3 for game winner markets)
+- `series_type` (text nullable; "bo1" | "bo3" | "bo5")
+- `parent_fixture_id` (fk → fixtures.id nullable; parent event for match/game markets)
 - `raw_json` (jsonb)
 - `created_at`, `updated_at`
 

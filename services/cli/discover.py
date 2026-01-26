@@ -24,11 +24,14 @@ logger = logging.getLogger(__name__)
 
 # Target leagues (normalized names for matching)
 TARGET_LEAGUE_PATTERNS = ["lck", "lpl", "lec", "lcs", "lta", "lcp"]
+TEAM_SUFFIXES = {"esports", "e-sports", "gaming", "team"}
 
 
 def normalize_name(name: str) -> str:
     """Normalize a name for fuzzy matching."""
-    return name.lower().strip()
+    normalized = "".join(ch.lower() if ch.isalnum() or ch.isspace() else " " for ch in name)
+    tokens = [t for t in normalized.split() if t and t not in TEAM_SUFFIXES]
+    return " ".join(tokens)
 
 
 def is_target_league(name: str) -> bool:
@@ -42,7 +45,70 @@ def similarity(a: str, b: str) -> float:
     return SequenceMatcher(None, normalize_name(a), normalize_name(b)).ratio()
 
 
-def discover_command(days: int, dry_run: bool = False) -> None:
+def _extract_polymarket_league(market: dict) -> str | None:
+    """Best-effort extraction of league label from a Polymarket market."""
+    candidates = [
+        market.get("groupItemTitle"),
+        market.get("groupTitle"),
+        market.get("league"),
+        market.get("tournament"),
+        market.get("question"),
+        market.get("title"),
+    ]
+    for value in candidates:
+        if not value:
+            continue
+        normalized = normalize_name(str(value))
+        for pattern in TARGET_LEAGUE_PATTERNS:
+            if pattern in normalized:
+                return pattern
+    return None
+
+
+def _extract_event_start(event: dict, markets: list[dict], match_market: dict | None) -> datetime | None:
+    """Infer event start time using market gameStartTime when available."""
+    candidates: list[str | None] = []
+    if match_market:
+        candidates.extend(
+            [
+                match_market.get("gameStartTime"),
+                match_market.get("game_start_time"),
+            ]
+        )
+    for market in markets:
+        if market.get("sportsMarketType") == "moneyline":
+            candidates.append(market.get("gameStartTime") or market.get("game_start_time"))
+            break
+    for market in markets:
+        candidates.append(market.get("gameStartTime") or market.get("game_start_time"))
+    candidates.extend([event.get("startDateIso"), event.get("startDate")])
+    for value in candidates:
+        parsed = _parse_datetime(value)
+        if parsed:
+            return parsed
+    return None
+
+
+def _extract_oddspapi_league(fixture: Fixture) -> str | None:
+    """Extract league label from OddsPapi fixture payload."""
+    league_name = fixture.raw_json.get("tournamentName") if fixture.raw_json else None
+    if not league_name:
+        return None
+    normalized = normalize_name(str(league_name))
+    for pattern in TARGET_LEAGUE_PATTERNS:
+        if pattern in normalized:
+            return pattern
+    return None
+
+
+def _date_match_gate(op_fix: Fixture, pm_fix: Fixture) -> bool:
+    """Hard date gate: require both start times and same UTC calendar date."""
+    if not op_fix.start_time or not pm_fix.start_time:
+        return False
+    return op_fix.start_time.date() == pm_fix.start_time.date()
+
+
+def discover_command(days: int, dry_run: bool = False, include_past: bool = False) -> None:
     """
     Main discovery flow:
     1. Fetch OddsPapi tournaments → filter to target leagues → store
@@ -53,7 +119,9 @@ def discover_command(days: int, dry_run: bool = False) -> None:
     """
     typer.echo(f"\n🔍 Discovering LoL matches for next {days} days...\n")
 
-    oddspapi = OddsPapiClient()
+    oddspapi = OddsPapiClient(
+        global_cooldown_ms=settings.oddspapi_global_cooldown_ms_discovery
+    )
     polymarket = PolymarketClient()
 
     now = datetime.now(tz=timezone.utc)
@@ -282,19 +350,144 @@ def discover_command(days: int, dry_run: bool = False) -> None:
                     # If no nested markets, the event itself might be the market
                     markets = [event]
 
+                match_market: dict | None = None
+                game_markets: list[tuple[dict, int | None]] = []
+
                 for m in markets:
-                    # Extract team names from market
-                    team_a, team_b = _extract_polymarket_teams(m)
-
-                    # Skip if we can't identify teams
-                    if not team_a or not team_b:
-                        continue
-
                     market_class = _classify_polymarket_market(m)
                     if not market_class:
                         continue
                     market_type, game_number = market_class
+                    if market_type == "match_winner":
+                        match_market = m
+                    elif market_type == "game_winner":
+                        game_markets.append((m, game_number))
 
+                event_fixture_id = None
+                series_type = _extract_series_type(match_market) if match_market else None
+                event_start = _extract_event_start(event, markets, match_market)
+
+                if match_market:
+                    team_a, team_b = _extract_polymarket_teams(match_market)
+                    if team_a and team_b:
+                        event_source_id = str(
+                            event.get("id") or event.get("slug") or event.get("eventId") or ""
+                        )
+                        if event_source_id:
+                            fixture_data = {
+                                "source": "polymarket",
+                                "source_id": event_source_id,
+                                "league_id": pm_league_db.id if pm_league_db else None,
+                                "team_a_name": team_a,
+                                "team_b_name": team_b,
+                                "start_time": event_start,
+                                "status": "upcoming"
+                                if event.get("active") and not event.get("closed")
+                                else "finished",
+                                "has_odds": False,
+                                "market_type": "event",
+                                "game_number": None,
+                                "series_type": series_type,
+                                "parent_fixture_id": None,
+                                "raw_json": event,
+                            }
+                            polymarket_fixtures.append(fixture_data)
+
+                            if not dry_run:
+                                stmt = insert(Fixture).values(
+                                    id=uuid4(), **fixture_data
+                                ).on_conflict_do_update(
+                                    index_elements=["source", "source_id"],
+                                    set_={
+                                        "league_id": fixture_data["league_id"],
+                                        "team_a_name": fixture_data["team_a_name"],
+                                        "team_b_name": fixture_data["team_b_name"],
+                                        "start_time": fixture_data["start_time"],
+                                        "status": fixture_data["status"],
+                                        "market_type": fixture_data["market_type"],
+                                        "game_number": fixture_data["game_number"],
+                                        "series_type": fixture_data["series_type"],
+                                        "parent_fixture_id": fixture_data["parent_fixture_id"],
+                                        "raw_json": fixture_data["raw_json"],
+                                    },
+                                )
+                                db.execute(stmt)
+                                parent = db.execute(
+                                    select(Fixture).where(
+                                        Fixture.source == "polymarket",
+                                        Fixture.source_id == event_source_id,
+                                    )
+                                ).scalar_one_or_none()
+                                if parent:
+                                    event_fixture_id = parent.id
+
+                if match_market:
+                    team_a, team_b = _extract_polymarket_teams(match_market)
+                    if team_a and team_b:
+                        fixture_data = {
+                            "source": "polymarket",
+                            "source_id": str(
+                                match_market.get("id")
+                                or match_market.get("conditionId")
+                                or event.get("id")
+                            ),
+                            "league_id": pm_league_db.id if pm_league_db else None,
+                            "team_a_name": team_a,
+                            "team_b_name": team_b,
+                            "start_time": _parse_datetime(
+                                match_market.get("gameStartTime")
+                                or match_market.get("game_start_time")
+                                or event.get("startDateIso")
+                                or event.get("startDate")
+                                or match_market.get("startDateIso")
+                                or match_market.get("startDate")
+                            ),
+                            "status": "upcoming"
+                            if (match_market.get("active") or event.get("active"))
+                            and not (match_market.get("closed") or event.get("closed"))
+                            else "finished",
+                            "has_odds": True,
+                            "market_type": "match_winner",
+                            "game_number": None,
+                            "series_type": series_type,
+                            "parent_fixture_id": event_fixture_id,
+                            "raw_json": match_market,
+                        }
+                        polymarket_fixtures.append(fixture_data)
+
+                        if not dry_run:
+                            stmt = insert(Fixture).values(
+                                id=uuid4(), **fixture_data
+                            ).on_conflict_do_update(
+                                index_elements=["source", "source_id"],
+                                set_={
+                                    "league_id": fixture_data["league_id"],
+                                    "team_a_name": fixture_data["team_a_name"],
+                                    "team_b_name": fixture_data["team_b_name"],
+                                    "start_time": fixture_data["start_time"],
+                                    "status": fixture_data["status"],
+                                    "market_type": fixture_data["market_type"],
+                                    "game_number": fixture_data["game_number"],
+                                    "series_type": fixture_data["series_type"],
+                                    "parent_fixture_id": fixture_data["parent_fixture_id"],
+                                    "raw_json": fixture_data["raw_json"],
+                                },
+                            )
+                            db.execute(stmt)
+                            parent = db.execute(
+                                select(Fixture).where(
+                                    Fixture.source == "polymarket",
+                                    Fixture.source_id == fixture_data["source_id"],
+                                )
+                            ).scalar_one_or_none()
+                            if parent and not event_fixture_id:
+                                event_fixture_id = parent.parent_fixture_id
+
+                for m, game_number in game_markets:
+                    team_a, team_b = _extract_polymarket_teams(m)
+                    if not team_a or not team_b:
+                        continue
+                    game_series_type = _extract_series_type(m) or series_type
                     fixture_data = {
                         "source": "polymarket",
                         "source_id": str(m.get("id") or m.get("conditionId") or event.get("id")),
@@ -302,18 +495,30 @@ def discover_command(days: int, dry_run: bool = False) -> None:
                         "team_a_name": team_a,
                         "team_b_name": team_b,
                         "start_time": _parse_datetime(
-                            m.get("gameStartTime") or m.get("startDate") or event.get("startDate")
+                            m.get("gameStartTime")
+                            or m.get("game_start_time")
+                            or m.get("startDateIso")
+                            or m.get("startDate")
+                            or event.get("startDateIso")
+                            or event.get("startDate")
                         ),
-                        "status": "upcoming" if (m.get("active") or event.get("active")) and not (m.get("closed") or event.get("closed")) else "finished",
+                        "status": "upcoming"
+                        if (m.get("active") or event.get("active"))
+                        and not (m.get("closed") or event.get("closed"))
+                        else "finished",
                         "has_odds": True,
-                        "market_type": market_type,
+                        "market_type": "game_winner",
                         "game_number": game_number,
+                        "series_type": game_series_type,
+                        "parent_fixture_id": event_fixture_id,
                         "raw_json": m,
                     }
                     polymarket_fixtures.append(fixture_data)
 
                     if not dry_run:
-                        stmt = insert(Fixture).values(id=uuid4(), **fixture_data).on_conflict_do_update(
+                        stmt = insert(Fixture).values(
+                            id=uuid4(), **fixture_data
+                        ).on_conflict_do_update(
                             index_elements=["source", "source_id"],
                             set_={
                                 "league_id": fixture_data["league_id"],
@@ -323,6 +528,8 @@ def discover_command(days: int, dry_run: bool = False) -> None:
                                 "status": fixture_data["status"],
                                 "market_type": fixture_data["market_type"],
                                 "game_number": fixture_data["game_number"],
+                                "series_type": fixture_data["series_type"],
+                                "parent_fixture_id": fixture_data["parent_fixture_id"],
                                 "raw_json": fixture_data["raw_json"],
                             },
                         )
@@ -341,11 +548,21 @@ def discover_command(days: int, dry_run: bool = False) -> None:
 
         # Reload fixtures from DB for mapping
         oddspapi_db_fixtures = db.execute(
-            select(Fixture).where(Fixture.source == "oddspapi")
+            select(Fixture).where(
+                Fixture.source == "oddspapi",
+                Fixture.start_time.is_not(None),
+                Fixture.start_time >= from_date,
+                Fixture.start_time <= to_date,
+            )
         ).scalars().all()
 
         polymarket_db_fixtures = db.execute(
-            select(Fixture).where(Fixture.source == "polymarket")
+            select(Fixture).where(
+                Fixture.source == "polymarket",
+                Fixture.start_time.is_not(None),
+                Fixture.start_time >= from_date,
+                Fixture.start_time <= to_date,
+            )
         ).scalars().all()
 
         mappings_created = 0
@@ -354,7 +571,7 @@ def discover_command(days: int, dry_run: bool = False) -> None:
 
         for op_fix in oddspapi_db_fixtures:
             for pm_fix in polymarket_db_fixtures:
-                if pm_fix.market_type not in {"match_winner", "game_winner"}:
+                if pm_fix.market_type != "event":
                     continue
 
                 confidence, details = _calculate_match_confidence(op_fix, pm_fix)
@@ -431,7 +648,8 @@ def discover_command(days: int, dry_run: bool = False) -> None:
     # Mapping Overview (all mappings from DB)
     # ============================================
     if not dry_run:
-        _print_mapping_overview()
+        window_start = now - timedelta(hours=1)
+        _print_mapping_overview(window_start=window_start, include_past=include_past)
 
     if dry_run:
         typer.secho("\n⚠️  Dry run - no data written to database", fg=typer.colors.YELLOW)
@@ -439,8 +657,8 @@ def discover_command(days: int, dry_run: bool = False) -> None:
     typer.echo("\n✅ Discovery complete!")
 
 
-def _print_mapping_overview() -> None:
-    """Print an overview of all mapped matches from the database."""
+def _print_mapping_overview(window_start: datetime, include_past: bool) -> None:
+    """Print an overview of mapped matches from the database."""
     with SessionLocal() as db:
         # Get all mappings
         all_mappings = db.execute(select(Mapping)).scalars().all()
@@ -464,6 +682,10 @@ def _print_mapping_overview() -> None:
             ).scalar_one_or_none()
 
             if op_fix and pm_fix:
+                start_ref = op_fix.start_time or pm_fix.start_time
+                if not include_past:
+                    if not start_ref or start_ref < window_start:
+                        continue
                 market_label = pm_fix.market_type
                 if pm_fix.game_number:
                     market_label = f"{market_label} G{pm_fix.game_number}"
@@ -472,6 +694,7 @@ def _print_mapping_overview() -> None:
                     "match": f"{op_fix.team_a_name} vs {op_fix.team_b_name}",
                     "pm_match": f"{pm_fix.team_a_name} vs {pm_fix.team_b_name}",
                     "start_time": op_fix.start_time,
+                    "pm_start_time": pm_fix.start_time,
                     "confidence": m.confidence,
                     "is_high": m.confidence >= 0.8,
                     "market": market_label or "",
@@ -484,11 +707,15 @@ def _print_mapping_overview() -> None:
         )
 
         for m in sorted_mappings:
-            # Format time
+            # Format times (UTC for consistency)
             if m["start_time"]:
-                time_str = m["start_time"].strftime("%b %d %H:%M UTC")
+                op_time_str = m["start_time"].strftime("%b %d %H:%M UTC")
             else:
-                time_str = "TBD"
+                op_time_str = "TBD"
+            if m.get("pm_start_time"):
+                pm_time_str = m["pm_start_time"].strftime("%b %d %H:%M UTC")
+            else:
+                pm_time_str = "TBD"
 
             # Confidence indicator with color
             conf_pct = int(m["confidence"] * 100)
@@ -501,7 +728,8 @@ def _print_mapping_overview() -> None:
 
             market_str = f" ({m['market']})" if m.get("market") else ""
             typer.echo(f"\n  {conf_str} {m['league']}{market_str}")
-            typer.echo(f"      📅 {time_str}")
+            typer.echo(f"      📅 OddsPapi: {op_time_str}")
+            typer.echo(f"      📅 Polymarket: {pm_time_str}")
             typer.echo(f"      🎮 {m['match']}")
             if m["match"].lower() != m["pm_match"].lower():
                 typer.echo(f"      🔮 {m['pm_match']} (Polymarket)")
@@ -589,7 +817,22 @@ def _calculate_match_confidence(op_fix: Fixture, pm_fix: Fixture) -> tuple[float
         "team_b_similarity": 0.0,
         "date_match": False,
         "teams_match": False,
+        "league_match": False,
     }
+
+    # Hard date gate (UTC date match required)
+    if not _date_match_gate(op_fix, pm_fix):
+        return 0.0, details
+    details["date_match"] = True
+
+    # League matching (best effort; gate if both sides known)
+    op_league = _extract_oddspapi_league(op_fix)
+    pm_league = _extract_polymarket_league(pm_fix.raw_json or {})
+    if op_league and pm_league:
+        if op_league != pm_league:
+            return 0.0, details
+        details["league_match"] = True
+        confidence += 0.2
 
     # Team matching (both ways - teams might be in different order)
     if op_fix.team_a_name and op_fix.team_b_name and pm_fix.team_a_name and pm_fix.team_b_name:
@@ -614,27 +857,16 @@ def _calculate_match_confidence(op_fix: Fixture, pm_fix: Fixture) -> tuple[float
 
         # Teams match if average similarity > 0.6
         details["teams_match"] = team_score > 0.6
-        confidence += team_score * 0.7  # Teams are 70% of confidence
+        confidence += team_score * 0.6  # Teams are 60% of confidence
 
-    # Time matching (exact time is strong signal, same day is good)
+    # Time matching (exact time is strong signal, same-day already gated)
     if op_fix.start_time and pm_fix.start_time:
         time_diff = abs((op_fix.start_time - pm_fix.start_time).total_seconds())
 
         if time_diff < 60:  # Within 1 minute = exact match
-            details["date_match"] = True
             details["time_exact"] = True
-            confidence += 0.3  # Full 30%
+            confidence += 0.2
         elif time_diff < 3600:  # Within 1 hour
-            details["date_match"] = True
-            details["time_exact"] = False
-            confidence += 0.25
-        elif op_fix.start_time.date() == pm_fix.start_time.date():
-            details["date_match"] = True
-            details["time_exact"] = False
-            confidence += 0.2  # Same day
-        elif abs((op_fix.start_time - pm_fix.start_time).days) <= 1:
-            # Within 1 day - partial credit
-            details["date_match"] = False
             details["time_exact"] = False
             confidence += 0.1
 
@@ -652,8 +884,7 @@ def _classify_polymarket_market(market: dict) -> tuple[str, int | None] | None:
     sports_type = (market.get("sportsMarketType") or "").lower()
 
     if sports_type == "moneyline" and "vs" in question:
-        if "bo3" in question or "match winner" in question or "series winner" in question:
-            return "match_winner", None
+        return "match_winner", None
 
     if sports_type == "child_moneyline":
         game_number = _extract_game_number(question) or _extract_game_number(group_title)
@@ -664,10 +895,30 @@ def _classify_polymarket_market(market: dict) -> tuple[str, int | None] | None:
 
 
 def _extract_game_number(text: str) -> int | None:
-    for n in (1, 2, 3):
-        if f"game {n} winner" in text:
+    normalized = text.lower()
+    for n in (1, 2, 3, 4, 5):
+        if f"game {n} winner" in normalized:
             return n
-        if f"game {n}" in text and "winner" in text:
+        if f"game {n}" in normalized and "winner" in normalized:
             return n
+        if f"map {n} winner" in normalized:
+            return n
+        if f"map {n}" in normalized and "winner" in normalized:
+            return n
+    return None
+
+
+def _extract_series_type(market: dict | None) -> str | None:
+    if not market:
+        return None
+    question = (market.get("question") or market.get("title") or "").lower()
+    group_title = (market.get("groupItemTitle") or "").lower()
+    combined = f"{question} {group_title}"
+    if "bo1" in combined or "best of 1" in combined:
+        return "bo1"
+    if "bo3" in combined or "best of 3" in combined:
+        return "bo3"
+    if "bo5" in combined or "best of 5" in combined:
+        return "bo5"
     return None
 

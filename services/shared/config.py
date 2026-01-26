@@ -42,11 +42,13 @@ class Settings(BaseSettings):
     target_leagues: str = "LCK,LPL,LEC,LCS,LTA,LCP"
 
     # Cooldowns (milliseconds) - OddsPapi rate limits
-    # Using slightly higher values than documented minimums for safety
-    cooldown_tournaments_ms: int = 1500
-    cooldown_participants_ms: int = 1500
+    # Discovery can be slower; live odds should be fast.
+    oddspapi_global_cooldown_ms_discovery: int = 2000
+    oddspapi_global_cooldown_ms_live: int = 900
+    cooldown_tournaments_ms: int = 2000
+    cooldown_participants_ms: int = 2000
     cooldown_fixtures_ms: int = 2500
-    cooldown_odds_ms: int = 750
+    cooldown_odds_ms: int = 900
 
     # Live monitoring
     monitor_poll_interval_seconds: int = 5

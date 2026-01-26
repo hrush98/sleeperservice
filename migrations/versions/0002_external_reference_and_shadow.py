@@ -1,6 +1,6 @@
 """external reference + mapping + shadow execution tables
 
-Revision ID: 0002_external_reference_and_shadow
+Revision ID: 0002_external_ref_shadow
 Revises: 0001_initial
 Create Date: 2026-01-22
 
@@ -11,7 +11,7 @@ import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
 
-revision = "0002_external_reference_and_shadow"
+revision = "0002_external_ref_shadow"
 down_revision = "0001_initial"
 branch_labels = None
 depends_on = None

@@ -1,5 +1,96 @@
 # Changelog
 
+## 2026-01-26 — Map OddsPapi to Polymarket events
+
+### What changed
+- Discovery now stores a Polymarket **event fixture** (parent match) with league/teams/start time.
+- Match + game markets are stored as **children** of the event via `parent_fixture_id`.
+- Mapping now links OddsPapi fixtures to Polymarket **event fixtures** instead of match markets.
+- Event start time is now derived from moneyline market `gameStartTime` when present.
+- Event start time falls back to event `startDate`/`startDateIso` only if no market time is available.
+- Live monitor now considers upcoming matches in the lookahead window and only displays them once OddsPapi reports `statusId=1` (live).
+- Live monitor refreshes candidate mappings every 2 minutes (fixed), independent of odds polling cadence.
+- Live monitor treats recent OddsPapi odds changes as live even if `statusId=0`, labeling rows as `LIVE*`.
+
+### Why
+Market-level timestamps can reflect listing/creation time, not match start. Event fixtures better represent the real-world match for reliable cross-source alignment.
+
+### Impact
+- Discovery output uses event start times for mapping and overview.
+- Live monitor now resolves match/game markets via the mapped event fixture.
+
+---
+
+## 2026-01-26 — Tighten discovery mapping gates
+
+### What changed
+- Mapping now filters OddsPapi and Polymarket fixtures to the requested date window before scoring.
+- Added a hard UTC date gate: mappings require the same calendar date on both sources.
+- League matching is enforced when detectable (OddsPapi tournament name vs Polymarket market text).
+- Team normalization now strips common suffixes (`esports`, `gaming`, `team`) to reduce fuzzy false positives.
+
+### Why
+Mismatches were driven by broad candidate pools (old Polymarket events) and weak gating; stricter date + league + cleaner team strings reduces false links.
+
+### Impact
+- Fewer low-confidence mappings and far fewer cross‑league/time mismatches.
+- Discovery results should align to the `--days` window and UTC dates.
+
+---
+
+## 2026-01-26 — Decouple live UI and add perf timing
+
+### What changed
+- Live monitor now runs data polling in a background loop; UI renders from shared state
+- Added per-loop CLOB batch timing and per-fixture OddsPapi timing logs
+- Log buffers are now thread-safe to support concurrent data/UI loops
+- Added a dedicated Performance panel in the live UI with per-loop timings
+
+### Why
+The UI render cadence should not gate data polling or future execution speed; timing logs help isolate the slowest calls.
+
+### Impact
+- UI refresh can run independently of data loop duration
+- New perf logs in system panel: `perf clob_batch_ms=...` and `perf oddspapi_ms=...`
+- Live UI now shows Total Loop, OddsPapi, CLOB, and Gamma timings each loop
+
+---
+
+## 2026-01-25 — Speed up live monitoring loop
+
+### What changed
+- Live monitor now batches CLOB orderbook fetches per loop instead of per mapping
+- Gamma market status is cached for 5 seconds to reduce repeat calls
+- Live monitor only loads **live** matches (no upcoming) to shrink candidate set
+- Odds panel updates now show a timestamp on the Sharps side for parity
+
+### Why
+The UI was refreshing quickly but data updates lagged due to sequential per‑mapping API calls.
+
+### Impact
+- **Before:** per loop ≈ `N * (OddsPapi 1 + Gamma 1 + CLOB 1)` ⇒ `3N` calls
+- **After:** per loop ≈ `N * OddsPapi 1 + Gamma cached (≤N per 5s) + CLOB 1 batch`
+- In practice, CLOB calls drop from **N → 1 per loop**, and N is smaller (live‑only)
+
+---
+
+## 2026-01-25 — Add match/game hierarchy for Polymarket
+
+### What changed
+- Added `series_type` and `parent_fixture_id` to fixtures for Bo1/Bo3/Bo5 tracking
+- Polymarket discovery now links game markets to the parent match market
+- Mappings now target match markets; game markets follow parent linkage
+- Live monitor loads game markets via match parent to track game end vs match ongoing
+
+### Why
+We need a durable match → game hierarchy so game markets can end while the match market remains live.
+
+### Impact
+- New migration required for `fixtures` table
+- Discovery/live flows now rely on parent-child fixture links
+
+---
+
 ## 2026-01-24 — Clarify Bo3 market scope (moneyline + games)
 
 ### What changed

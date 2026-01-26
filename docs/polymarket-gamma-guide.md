@@ -117,6 +117,10 @@ curl --request GET \
 **Response shape (high-level)**
 The docs’ example response for events is large; it includes many event fields and nested arrays (notably `markets`, and within markets: tags, pricing/market metadata, etc.). :contentReference[oaicite:23]{index=23}
 
+**Implementation note (this project)**
+- We treat the **event** as the parent match fixture and derive its start time from the moneyline market `gameStartTime` when present.
+- Match/game markets are stored as children of the event; `gameStartTime` (or `game_start_time`) is preferred for markets when present.
+
 > I didn’t capture the full query-parameter table for `/events` in the retrieved sources, only that it supports filtering/sorting plus the example response portions shown in the docs. :contentReference[oaicite:24]{index=24}
 
 ## GET /events/{id} — Get event by id

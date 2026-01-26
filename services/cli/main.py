@@ -33,6 +33,7 @@ app = typer.Typer(
 def discover(
     days: int = typer.Option(7, "--days", "-d", help="Number of days ahead to look for fixtures"),
     dry_run: bool = typer.Option(False, "--dry-run", help="Don't write to database, just print"),
+    past: bool = typer.Option(False, "--past", help="Include past mappings in overview output"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose logging"),
 ):
     """
@@ -45,7 +46,7 @@ def discover(
         logging.getLogger().setLevel(logging.DEBUG)
 
     try:
-        discover_command(days=days, dry_run=dry_run)
+        discover_command(days=days, dry_run=dry_run, include_past=past)
     except KeyboardInterrupt:
         typer.echo("\nDiscovery cancelled.")
         raise typer.Exit(code=1)
@@ -84,7 +85,19 @@ def monitor(
 
 @app.command()
 def live(
-    interval: int = typer.Option(5, "--interval", "-i", help="Poll interval in seconds"),
+    interval: float | None = typer.Option(
+        None,
+        "--interval",
+        "-i",
+        help="Poll interval in seconds (overrides --speed)",
+    ),
+    speed: str = typer.Option(
+        "MED",
+        "--speed",
+        "-s",
+        help="Polling speed preset: FAST, MED, SLOW",
+        case_sensitive=False,
+    ),
     edge_threshold: float = typer.Option(0.03, "--edge-threshold", help="Net edge threshold for alerts"),
     spread_factor: float = typer.Option(1.0, "--spread-factor", help="Spread penalty multiplier"),
     min_confidence: float = typer.Option(0.7, "--min-confidence", help="Minimum mapping confidence"),
@@ -101,8 +114,13 @@ def live(
         logging.getLogger().setLevel(logging.DEBUG)
 
     try:
+        if speed:
+            speed = speed.upper()
+            if speed not in {"FAST", "MED", "SLOW"}:
+                raise typer.BadParameter("speed must be FAST, MED, or SLOW")
         live_command(
             interval=interval,
+            speed=speed,
             edge_threshold=edge_threshold,
             spread_factor=spread_factor,
             min_confidence=min_confidence,

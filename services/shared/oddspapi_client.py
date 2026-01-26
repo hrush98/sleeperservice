@@ -15,6 +15,7 @@ Cooldowns (per endpoint):
 """
 
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -33,10 +34,10 @@ class CooldownTracker:
     Tracks both per-endpoint and global cooldowns to avoid 429 errors.
     """
 
-    def __init__(self):
+    def __init__(self, global_cooldown_ms: int):
         self._last_call: dict[str, float] = {}
         self._last_global: float = 0
-        self._global_cooldown_ms: int = 1000  # Minimum 1s between ANY requests
+        self._global_cooldown_ms: int = global_cooldown_ms
 
     def wait(self, endpoint: str, cooldown_ms: int) -> None:
         """Wait if necessary to respect both endpoint and global cooldowns."""
@@ -75,11 +76,14 @@ class OddsPapiClient:
         base_url: str | None = None,
         api_key: str | None = None,
         sport_id: int | None = None,
+        global_cooldown_ms: int | None = None,
     ):
         self.base_url = base_url or settings.oddspapi_base_url
         self.api_key = api_key or settings.odds_api_key
         self.sport_id = sport_id or settings.oddspapi_lol_sport_id
-        self._cooldown = CooldownTracker()
+        self._cooldown = CooldownTracker(
+            global_cooldown_ms or settings.oddspapi_global_cooldown_ms_discovery
+        )
 
     def _auth_params(self) -> dict[str, str]:
         """Return auth params for OddsPapi (apiKey query param)."""
@@ -278,8 +282,10 @@ class OddsPapiClient:
         markets = pinnacle.get("markets") or {}
 
         candidates: list[dict[str, Any]] = []
-        for market in markets.values():
+        for market_id, market in markets.items():
             if not isinstance(market, dict):
+                continue
+            if OddsPapiClient._market_is_game(market, market_id):
                 continue
             parsed = OddsPapiClient._parse_home_away_market(market)
             if parsed:
@@ -310,10 +316,10 @@ class OddsPapiClient:
         markets = pinnacle.get("markets") or {}
 
         candidates: list[dict[str, Any]] = []
-        for market in markets.values():
+        for market_id, market in markets.items():
             if not isinstance(market, dict):
                 continue
-            parsed = OddsPapiClient._parse_game_market(market, game_number)
+            parsed = OddsPapiClient._parse_game_market(market, game_number, market_id)
             if parsed:
                 candidates.append(parsed)
 
@@ -367,12 +373,18 @@ class OddsPapiClient:
         return {}
 
     @staticmethod
-    def _parse_game_market(market: dict, game_number: int) -> dict[str, Any]:
-        """Parse a market only if selections include explicit game/map markers."""
+    def _parse_game_market(
+        market: dict,
+        game_number: int,
+        market_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Parse a market only if it belongs to the requested game/map."""
         outcomes = market.get("outcomes") or {}
         result: dict[str, Any] = {}
         required_home = {f"game{game_number}/home", f"map{game_number}/home"}
         required_away = {f"game{game_number}/away", f"map{game_number}/away"}
+        hinted_game = OddsPapiClient._market_game_number(market, market_id)
+        game_hint = hinted_game == game_number
 
         for outcome in outcomes.values():
             if not isinstance(outcome, dict):
@@ -407,10 +419,40 @@ class OddsPapiClient:
                     }
                 except (ValueError, TypeError):
                     return {}
+            elif game_hint and selection in {"home", "away"} and price is not None:
+                try:
+                    price_float = float(price)
+                    implied_prob = 1.0 / price_float if price_float > 0 else None
+                    result[selection] = {
+                        "price": price_float,
+                        "implied_prob": implied_prob,
+                        "changed_at": changed_at,
+                    }
+                except (ValueError, TypeError):
+                    return {}
 
         if result.get("home") and result.get("away"):
             return result
         return {}
+
+    @staticmethod
+    def _market_game_number(market: dict, market_id: str | None = None) -> int | None:
+        values = [market_id, market.get("bookmakerMarketId")]
+        for value in values:
+            if not value:
+                continue
+            normalized = "".join(ch.lower() for ch in str(value) if ch.isalnum())
+            match = re.search(r"(map|game)(\d)", normalized)
+            if match:
+                try:
+                    return int(match.group(2))
+                except ValueError:
+                    continue
+        return None
+
+    @staticmethod
+    def _market_is_game(market: dict, market_id: str | None = None) -> bool:
+        return OddsPapiClient._market_game_number(market, market_id) is not None
 
     @staticmethod
     def parse_fixture_status(status_id: int | None) -> str:
