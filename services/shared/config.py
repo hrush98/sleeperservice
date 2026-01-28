@@ -35,8 +35,14 @@ class Settings(BaseSettings):
     # Polymarket
     polymarket_base_url: str = "https://gamma-api.polymarket.com"
     polymarket_clob_url: str = "https://clob.polymarket.com"
+    polymarket_ws_url: str = "wss://ws-subscriptions-clob.polymarket.com"
     poly_api_key: str | None = None
     polymarket_game_bets_tag_id: int = 100639  # Game bets tag for LoL
+
+    # Polymarket WebSocket
+    ws_ping_interval_seconds: int = 10
+    ws_reconnect_base_seconds: float = 1.0
+    ws_reconnect_max_seconds: float = 30.0
 
     # Target leagues (comma-separated)
     target_leagues: str = "LCK,LPL,LEC,LCS,LTA,LCP"
@@ -49,6 +55,21 @@ class Settings(BaseSettings):
     cooldown_participants_ms: int = 2000
     cooldown_fixtures_ms: int = 2500
     cooldown_odds_ms: int = 900
+    cooldown_odds_by_tournaments_ms: int = 1000
+
+    # OddsPapi polling
+    hot_fixture_poll_ms: int = 500
+    hot_fixture_ttl_seconds: int = 60
+
+    # Trigger thresholds
+    trigger_primary_threshold: float = 0.02
+    trigger_burst_threshold: float = 0.05
+    trigger_adaptive_multiplier: float = 3.0
+
+    # Edge calculation
+    alpha_min: float = 0.03
+    alpha_spread_factor: float = 1.5
+    exit_epsilon: float = 0.01
 
     # Live monitoring
     monitor_poll_interval_seconds: int = 5

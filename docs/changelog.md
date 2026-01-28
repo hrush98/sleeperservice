@@ -1,5 +1,35 @@
 # Changelog
 
+## 2026-01-26
+### What changed
+- Implemented event-driven live monitor flow: league polling + hot fixture polling + Polymarket WS state
+- Added OddsPapi `/v4/odds-by-tournaments` client method and config cooldown
+- Added Polymarket WS manager (`services/shared/polymarket_ws.py`) with in-memory book state
+- Added fixture state manager (`services/shared/fixture_state.py`) for Δp_ref tracking, EWMA, hot TTLs
+- Enhanced edge utilities with alpha/avg-fill/exit helpers in `services/shared/edge.py`
+- Updated `services/cli/live.py` to use async loops, WS snapshots, and cached OddsPapi payloads
+- Updated config with WS connection settings, trigger thresholds, and hot polling controls
+- Added `websockets==12.0` dependency for WS client
+- Updated docs: architecture, project plan, and OddsPapi guide with new endpoint + flow
+  - Architecture flow update (per `docs/architecture.md`):
+    - Old: per-mapping OddsPapi `/v4/odds` + CLOB HTTP batch each loop
+    - New: league-wide `/v4/odds-by-tournaments` every 1s, hot per-fixture `/v4/odds` at 500ms
+    - New: Polymarket WS drives top-of-book + depth in memory; CLOB HTTP only as fallback
+    - New: Trigger-driven compute path: Δp_ref event → hot TTL → compare vs PM book
+  - Data flow update:
+    - OddsPapi batch odds now feed an in-memory cache keyed by fixtureId
+    - WS book state now feeds edge calc directly (ask/bid + depth)
+    - Gamma market status checks are cached and decoupled from price updates
+
+### Why
+This is a latency-sensitive strategy. League-level batch polling surfaces movement quickly, hot polling targets fast changes without blowing rate limits, and WS state removes redundant CLOB HTTP calls.
+
+### Impact
+- Live monitor now uses `odds-by-tournaments` as baseline, with 500ms hot polling per fixture
+- Polymarket prices come from WS book state (top-of-book + depth in memory)
+- Triggering is based on Δp_ref thresholds and hot TTL escalation
+- New config options for WS reconnect and trigger tuning
+
 ## 2026-01-26 — Map OddsPapi to Polymarket events
 
 ### What changed
@@ -228,6 +258,8 @@ The new design is:
   - Defined new canonical entities: external matches/odds snapshots, mapping table, disagreement/edge events, and order book snapshots
 - Why: the core edge is a short timing window where Polymarket prices lag a sharp external line; measurement must validate the window and fillability.
 - Impact: governing docs now target lead–lag arbitrage; future milestones, schema additions, and ingestion sources should align with this plan.
+
+
 
 ## 2026-01-16
 - Initialized repo documentation seed:

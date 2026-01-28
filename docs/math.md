@@ -1,9 +1,9 @@
 # LoL Lead–Lag Arbitrage Engine
-## Monitoring + Actionability Math Reference (Odds Ingestion → Comparison → Alerts)
+## Monitoring + Actionability Math Reference (v2 — Event-Driven Architecture)
 
 This document defines the **analytics core** for the lead–lag strategy:
-- Ingest **external “sharp” odds** (Pinnacle via OddsPapi).
-- Ingest **Polymarket CLOB market state** (best bid/ask + depth).
+- Ingest **external "sharp" odds** (Pinnacle via OddsPapi).
+- Ingest **Polymarket CLOB market state** (best bid/ask + depth via WebSocket).
 - Convert both into comparable probabilities.
 - Compute **actionable disagreement** (edge after realistic frictions).
 - Produce alerts + lag/quality metrics.
@@ -29,11 +29,12 @@ You must be able to map:
 - `oddsA(t_ref)` and `oddsB(t_ref)` (decimal odds preferred)
 - optional: `suspended/locked` state, `last_update`
 
-**Polymarket CLOB state**
+**Polymarket CLOB state (via WebSocket)**
 - best bid/ask for each outcome:
   - `bidA(t_pm)`, `askA(t_pm)`
   - `bidB(t_pm)`, `askB(t_pm)`
 - depth ladder (for slippage modeling): top N levels on both sides
+- Maintained in-memory via WebSocket `book` and `price_change` messages
 
 ### Invariants / sanity checks
 - `askA >= bidA`, `askB >= bidB`
@@ -77,9 +78,10 @@ For outcome A:
 
 Same for B.
 
-### 2.2 Mid price (for monitoring only)
+### 2.2 Mid price (for monitoring/reference only)
 - `midA = (bidA + askA)/2`
-Use mid as a descriptive statistic; do **not** use mid to estimate fill cost.
+
+Use mid as a descriptive statistic and as the **reference point for comparison**. Do **not** use mid to estimate fill cost—use the ask ladder for buys.
 
 ### 2.3 Market quality primitives
 These are inputs to gating and alert ranking:
@@ -92,235 +94,399 @@ These are inputs to gating and alert ranking:
 
 ---
 
-## 3) Gross disagreement / “paper edge”
+## 3) Dynamic alpha: spread-aware edge threshold
 
-You’re comparing:
-- `p_ref` (external fair probability)
-- `p_pm_buy` / `p_pm_sell` (tradeable Polymarket prices)
+Rather than a fixed edge threshold, we use a **dynamic alpha** that adapts to market conditions.
 
-### 3.1 Buying A
-The gross “mispricing” if buying A right now:
-- `edge_gross_buy_A = p_ref_A - p_pm_buy_A`
+### 3.1 Alpha formula (entry threshold)
 
-If `edge_gross_buy_A <= 0`, A is not cheap relative to reference.
+```
+alpha_entry = max(min_alpha, spread_factor * spread + buffer)
+```
 
-### 3.2 Buying B (the complement)
-Similarly:
-- `edge_gross_buy_B = p_ref_B - p_pm_buy_B`
+**Default parameters:**
+- `min_alpha = 0.03` (3 cents minimum edge required)
+- `spread_factor = 1.5`
+- `buffer = 0.01` (1 cent)
 
-In a binary world, one side may look better depending on spreads and liquidity.
+**Examples:**
+| Spread | Alpha |
+|--------|-------|
+| 0.01   | max(0.03, 1.5×0.01 + 0.01) = 0.03 |
+| 0.02   | max(0.03, 1.5×0.02 + 0.01) = 0.04 |
+| 0.03   | max(0.03, 1.5×0.03 + 0.01) = 0.055 |
+| 0.04   | max(0.03, 1.5×0.04 + 0.01) = 0.07 |
 
-> Best practice: evaluate both sides and pick the **higher net actionable edge**, not “always buy the team that improved.”
+**Rationale:** Wider spreads imply worse books—require bigger edges to compensate for execution friction.
+
+### 3.2 Implementation
+
+```python
+def compute_alpha_entry(spread: float, min_alpha: float = 0.03, spread_factor: float = 1.5) -> float:
+    return max(min_alpha, (spread_factor * spread) + 0.01)
+```
 
 ---
 
-## 4) Friction-aware edge: turn disagreement into “actionable”
+## 4) Entry edge: depth-aware average fill
 
-This is the most important section. A disagreement is only actionable if it survives:
-- spread
-- depth/slippage
-- fees (if known)
-- (optionally) delay/latency penalty as a monitoring discount
+### 4.1 Average fill price from ask ladder
 
-### 4.1 Slippage model from depth (avg fill price)
-For a candidate size `Q` shares, compute average buy price by walking asks:
+For a candidate size `Q` shares, compute expected average buy price by walking asks:
 
 Let ask ladder be `(p1, q1), (p2, q2), ...` where `p1` is best ask.
 
-Fill `Q` shares from the ladder:
-- `avg_buy_price_A(Q) = (Σ_i p_i * fill_i) / Q`
-where `fill_i = min(q_i, remaining)`
+```python
+def compute_avg_fill_price(asks: list[tuple[float, float]], quantity: float) -> float | None:
+    if quantity <= 0 or not asks:
+        return None
+    remaining = quantity
+    total_cost = 0.0
+    filled = 0.0
+    for price, size in asks:
+        if remaining <= 0:
+            break
+        take = min(size, remaining)
+        total_cost += price * take
+        filled += take
+        remaining -= take
+    if filled <= 0:
+        return None
+    return total_cost / filled
+```
 
-Then:
-- `slip_buy_A(Q) = avg_buy_price_A(Q) - askA`
+### 4.2 Entry edge calculation
 
-Do this for whichever side you’re considering.
+The entry signal uses **p_ref vs expected average fill** (not best ask):
 
-> Best practice: compute `avg_buy_price(Q)` for a small set of sizes (e.g., 25, 50, 100, 250, 500 shares) to build an “edge vs size” curve.
+```
+limit_price = p_ref - alpha
+size_available = sum(size for price, size in asks if price <= limit_price)
+avg_fill = compute_avg_fill_price(asks, min(Q_probe, size_available))
+net_edge = p_ref - avg_fill
+actionable = (avg_fill is not None) and (net_edge >= alpha)
+```
 
-### 4.2 Spread penalty (for “close later” realism)
-Even if you aren’t defining execution here, **actionability** should assume that eventually you must exit into the bid.
+### 4.3 Entry edge implementation
 
-A conservative spread penalty:
-- `spread_penalty_A = spreadA`
-A moderate penalty (if you expect improved liquidity on exit):
-- `spread_penalty_A = 0.5 * spreadA`
+```python
+def compute_entry_edge(
+    p_ref: float | None,
+    asks: list[tuple[float, float]],
+    quantity: float,
+    alpha: float,
+) -> dict:
+    if p_ref is None:
+        return {"actionable": False, "limit_price": None, "size_available": 0.0, "avg_fill": None, "net_edge": None}
+    
+    limit_price = p_ref - alpha
+    size_available = sum(size for price, size in asks if price <= limit_price)
+    avg_fill = compute_avg_fill_price(asks, min(quantity, size_available)) if size_available else None
+    net_edge = (p_ref - avg_fill) if avg_fill is not None else None
+    actionable = avg_fill is not None and net_edge is not None and net_edge >= alpha
+    
+    return {
+        "actionable": actionable,
+        "limit_price": limit_price,
+        "size_available": size_available,
+        "avg_fill": avg_fill,
+        "net_edge": net_edge,
+    }
+```
 
-### 4.3 Fee penalty (if applicable / known)
-Represent fees in dollar space when you later simulate fills. For monitoring, you can approximate a probability-space penalty:
-- `fee_penalty ≈ fee_rate * p_pm_buy_A` (rough)
-or store fee separately and subtract during execution simulation.
+### 4.4 Example
 
-### 4.4 Latency/delay penalty as a monitoring discount (recommended)
-Even without execution, you should discount edge by expected adverse movement during your reaction window.
+```
+p_ref_A = 0.72
+asks = [(0.68, 100), (0.69, 150), (0.70, 200)]
+spread = 0.68 - 0.65 = 0.03
+alpha = max(0.03, 1.5*0.03 + 0.01) = 0.055
+limit_price = 0.72 - 0.055 = 0.665
 
-Define empirical “price velocity after ref jump”:
-- `v = median(|ΔmidA| / Δt)` within the first few seconds after similar ref moves
-Then a delay discount:
-- `delay_penalty ≈ v * τ`
-where `τ` is your expected reaction+platform delay window (seconds).
+Size available at ≤ 0.665: 0 (best ask is 0.68)
+→ Not actionable (no shares below limit price)
 
-If you don’t have this yet, start with a conservative fixed discount (e.g., 0.01–0.02) and replace with empirical estimates once you have data.
-
-### 4.5 Net actionable edge (buy A, size Q)
-A practical definition:
-- `edge_net_buy_A(Q) = p_ref_A - avg_buy_price_A(Q) - spread_penalty_A - fee_penalty - delay_penalty`
-
-Similarly for buying B:
-- `edge_net_buy_B(Q) = p_ref_B - avg_buy_price_B(Q) - spread_penalty_B - fee_penalty - delay_penalty`
-
-**Actionable condition** (monitoring):
-- `max(edge_net_buy_A(Q*), edge_net_buy_B(Q*)) > edge_threshold`
-
-Where `Q*` is your “standard probe size” (e.g., 100 shares) used to decide if the book is truly mispriced.
-
----
-
-## 5) Triggers: when to compute / alert (avoid noise)
-
-You don’t want to evaluate everything constantly; use trigger logic based on **reference movement** and **market conditions**.
-
-### 5.1 Reference jump trigger
-Compute `p_ref_A(t)` each poll. Define:
-- `jump = |p_ref_A(t) - p_ref_A(t_prev)|`
-
-Trigger evaluation if:
-- `jump >= jump_threshold` (e.g., 0.02)
-
-### 5.2 Reference “lock/suspend” trigger (high signal)
-If external feed indicates suspension/lock then reopens with new odds, treat reopen as an immediate trigger. Locks often coincide with discrete events.
-
-### 5.3 Polymarket “staleness” trigger
-If `p_ref` moved but PM mid did not:
-- `stale = |p_ref_A(t) - midA(t)| >= stale_threshold`
-AND PM updates are not keeping pace (few trades / unchanged top-of-book)
-
-This helps identify moments where PM truly lags.
-
-### 5.4 Quality gating (must pass before alert)
-A gap isn’t actionable if the market is untradeable.
-
-Example gates:
-- `spreadA <= spread_max` (e.g., 0.04)
-- `depth_at_or_better_A(askA + depth_band) >= min_depth` (e.g., ≥ 200 shares within +2c)
-- Data freshness: `now - t_ref <= ref_staleness_max` and `now - t_pm <= pm_staleness_max`
-
----
-
-## 6) Actionability outputs: what you store and alert on
-
-### 6.1 Disagreement event record
-When a trigger fires and gates pass, create an event with:
-
-**Identity**
-- match id (external)
-- polymarket market id
-- outcome side (A or B)
-- market type (match winner / map winner)
-
-**Timestamps**
-- `t_ref`, `t_pm`, `t_event_created`
-
-**Probabilities / prices**
-- `p_ref_A`, `p_ref_B`
-- `bidA`, `askA`, `midA` (and B)
-- `spreadA`, `spreadB`
-
-**Edge**
-- `edge_gross` (for chosen side)
-- `edge_net(Q_probe)` for a small set of Q sizes (or at least one)
-- supporting components (spread_penalty, slippage_est, delay_penalty)
-
-**Liquidity**
-- depth summaries (e.g., depth within +1c, +2c, +5c)
-
-**Confidence / mapping**
-- mapping confidence score + method (auto/manual)
-- league/tournament identifiers
-
-### 6.2 Alert score (rank ordering)
-Rank alerts by something like:
-- `alert_score = edge_net(Q_probe) * liquidity_factor * freshness_factor * mapping_confidence`
-
-Where:
-- `liquidity_factor` increases with depth and decreases with spread
-- `freshness_factor` decreases with staleness of ref/pm snapshots
-
-Goal: prioritize **realizable** edges, not theoretical ones.
+If asks = [(0.65, 100), (0.66, 150), (0.67, 200)]:
+limit_price = 0.665
+size_available = 100 (only first level qualifies)
+avg_fill for 100 shares = 0.65
+net_edge = 0.72 - 0.65 = 0.07 >= 0.055
+→ Actionable! BUY up to 100 shares at limit 0.665
+```
 
 ---
 
-## 7) Measurement-first: lag profiling and calibration (best practice)
+## 5) Exit signal: convergence detection
 
-Even before execution, you should measure whether your assumed edge window exists.
+### 5.1 Exit condition
 
-### 7.1 Define “ref move” events
-A ref move event occurs when:
-- `jump >= jump_threshold`
+Exit (close position) when the market has converged with the sharp reference:
 
-Record:
-- `t0 = t_ref`
-- magnitude `Δp_ref`
+```
+exit_signal = (p_ref - bid) <= epsilon
+```
 
-### 7.2 Measure PM catch-up time
-Define PM “caught up” when:
-- `|midA(t) - p_ref_A(t0)| <= ε` (e.g., ε = 0.01)
-or when PM moves by a large fraction of the ref shift:
-- `|midA(t) - midA(t_before)| >= κ * |Δp_ref|` (e.g., κ = 0.6)
+**Default:** `epsilon = 0.01` (1 cent)
 
-Then compute:
-- `lag = t_catchup - t0`
+**Interpretation:** When the best bid price is within 1 cent of the sharp fair probability, the edge has evaporated—time to exit.
 
-Store lag distributions by:
-- league (LCK/LPL)
-- market type (match/map)
-- liquidity bucket (depth/spread)
-- magnitude bucket (size of ref move)
+### 5.2 Implementation
 
-### 7.3 “Would-have-been-actionable” rate
-Compute:
-- fraction of ref move events where `edge_net(Q_probe) > threshold` for at least one side
-- average time that condition remained true (edge half-life)
+```python
+def compute_exit_signal(p_ref: float | None, bid: float | None, epsilon: float = 0.01) -> bool:
+    if p_ref is None or bid is None:
+        return False
+    return (p_ref - bid) <= epsilon
+```
 
-This tells you if polling cadence and reaction windows are even viable.
+### 5.3 Example
 
-### 7.4 Guardrails for soundness
-To align with best practices in lead–lag systems:
-- Treat external odds as **reference**, not oracle: track overround and data glitches.
-- Require **freshness** and **mapping confidence** for any alert.
-- Use **book depth** to estimate slippage; never alert solely on mid price.
-- Keep thresholds conservative until you have empirical lag + fillability evidence.
+```
+Entry: p_ref_A = 0.72, bought at avg_fill = 0.66
+...market moves...
+Now: p_ref_A = 0.70, bidA = 0.69
+exit_signal = (0.70 - 0.69) = 0.01 <= 0.01 → True, EXIT
+```
 
 ---
 
-## Recommended default parameters (starting points)
-These are intentionally conservative; tune with measurement.
+## 6) Triggers: event-driven evaluation (two-tier polling)
 
-- `poll_interval_ref`: 2–5 seconds (start with 5s if rate-limited)
-- `jump_threshold`: 0.02
-- `edge_threshold` (net): 0.02–0.05 (2–5 cents)
-- `spread_max`: 0.04
-- `Q_probe`: 100 shares (and optionally 250)
-- `ε` catch-up tolerance: 0.01
+### 6.1 Architecture overview
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    OddsPapi Two-Tier Polling                    │
+├─────────────────────────────────────────────────────────────────┤
+│  League Poll                    │  Hot Fixture Poll             │
+│  /v4/odds-by-tournaments        │  /v4/odds                     │
+│  @ 1000ms (all fixtures)        │  @ 500ms (hot fixtures only)  │
+│  Broad radar for Δp_ref         │  High-frequency when moving   │
+└─────────────────────────────────┴───────────────────────────────┘
+                  │                             │
+                  ▼                             ▼
+         ┌───────────────────────────────────────────┐
+         │           Fixture State Manager           │
+         │  - p_ref history per fixture              │
+         │  - EWMA(σ) volatility tracking            │
+         │  - hot_until timestamps                   │
+         │  - trigger detection                      │
+         └───────────────────────────────────────────┘
+                           │
+                           ▼
+         ┌───────────────────────────────────────────┐
+         │         Polymarket WebSocket              │
+         │  - Subscribed to tracked asset_ids        │
+         │  - In-memory book state (bid/ask/depth)   │
+         │  - No HTTP polling for book data          │
+         └───────────────────────────────────────────┘
+```
+
+### 6.2 Trigger thresholds
+
+| Trigger Type | Condition | Action |
+|--------------|-----------|--------|
+| **Primary** | `\|Δp_ref\| >= 0.02` | Evaluate edge, log event |
+| **Burst** | `\|Δp_ref\| >= 0.05` | Immediate hot mode (90s TTL), high urgency |
+| **Lock/Unlock** | Status toggle | Trigger regardless of Δp_ref |
+| **Adaptive** | `\|Δp_ref\| >= max(0.02, 3σ)` | Dynamic threshold based on volatility |
+
+### 6.3 EWMA volatility tracking
+
+Track rolling volatility of p_ref changes per fixture:
+
+```
+σ_new = α * |Δp_ref| + (1 - α) * σ_old
+```
+
+Where `α = 0.1` (smoothing factor).
+
+Adaptive threshold:
+```
+threshold_adaptive = max(0.02, 3 * σ)
+```
+
+This keeps triggers quiet during calm periods and sensitive during chaotic ones.
+
+### 6.4 Hot fixture escalation
+
+When a trigger fires:
+1. Set `hot_until = now + TTL`
+   - Primary trigger: `TTL = 60s`
+   - Burst trigger: `TTL = 90s`
+2. Poll this fixture at 500ms (vs 1s league poll) until `hot_until` expires
+3. Renew TTL on continued movement
+
+### 6.5 Anti-flicker guard
+
+Don't trigger purely on single-tick moves. Options:
+- Require move to persist for 2 polls (anti-flicker)
+- Or accept single-tick triggering only for large jumps (`>= 0.05`)
 
 ---
 
-## Checklist: “Is this signal actionable?”
-A disagreement becomes an alert only if:
+## 7) Quality gating (must pass before alert)
 
-1) **Fresh data**: ref and PM snapshots are recent.
-2) **Correct mapping**: external match ↔ PM market/outcome is high confidence.
-3) **Trigger**: ref moved meaningfully (jump/lock).
-4) **Quality gate**: spread and depth are acceptable.
-5) **Net edge**: `edge_net(Q_probe) > edge_threshold` after spread/slippage/discounts.
-6) **Logged**: store an event record with full components for offline analysis.
+A gap isn't actionable if the market is untradeable.
+
+### 7.1 Spread gate
+```
+spreadA <= spread_max  (e.g., 0.05)
+```
+
+### 7.2 Depth gate
+```
+size_available >= min_depth  (e.g., 100 shares at limit_price)
+```
+
+### 7.3 Freshness gate
+```
+now - t_ref <= ref_staleness_max  (e.g., 10s)
+now - t_pm <= pm_staleness_max    (e.g., 5s, from WS timestamp)
+```
+
+### 7.4 Mapping confidence gate
+```
+mapping_confidence >= min_confidence  (e.g., 0.6)
+```
 
 ---
 
-## Appendix: Why odds-first is the right v0 reference
-Using external live odds avoids building a LoL win-probability model immediately:
-- the “event → probability” mapping is already embedded in the sharp book’s model
-- you focus on lead–lag mechanics: latency, book state, slippage, and alerting
+## 8) Actionability outputs
 
-Later, you can add event feeds as features or corroboration—but 
-::contentReference[oaicite:0]{index=0}
+### 8.1 Entry alert record
+
+When entry conditions are met:
+
+```python
+{
+    # Identity
+    "fixture_id": "...",
+    "market_id": "...",
+    "outcome_side": "A",
+    "market_type": "match_winner",
+    
+    # Timestamps
+    "t_ref": "...",
+    "t_pm": "...",
+    "t_alert": "...",
+    
+    # Reference
+    "p_ref_A": 0.72,
+    "p_ref_B": 0.28,
+    
+    # Polymarket state
+    "bid_A": 0.65,
+    "ask_A": 0.68,
+    "mid_A": 0.665,
+    "spread_A": 0.03,
+    
+    # Edge calculation
+    "alpha": 0.055,
+    "limit_price": 0.665,
+    "size_available": 150,
+    "avg_fill": 0.66,
+    "net_edge": 0.06,
+    "actionable": True,
+    
+    # Trigger info
+    "trigger_type": "burst",
+    "delta_p_ref": 0.07,
+    "urgency": "high",
+}
+```
+
+### 8.2 Exit alert record
+
+When exit conditions are met:
+
+```python
+{
+    "fixture_id": "...",
+    "outcome_side": "A",
+    "p_ref_A": 0.70,
+    "bid_A": 0.69,
+    "gap": 0.01,
+    "exit_signal": True,
+    "reason": "convergence",
+}
+```
+
+---
+
+## 9) Summary: BUY vs SELL logic
+
+| Action | Price Used | Condition | Calculation |
+|--------|------------|-----------|-------------|
+| **BUY (entry)** | ASK ladder | `p_ref - avg_fill >= alpha` | Walk asks to compute avg fill |
+| **SELL (exit)** | BID | `p_ref - bid <= epsilon` | Direct comparison |
+
+### 9.1 Why ASK for entry, BID for exit?
+
+- **Entry:** You're buying into asks. The ask ladder determines your actual fill price.
+- **Exit:** You're selling into bids. The best bid determines your exit price.
+
+### 9.2 Why dynamic alpha?
+
+Fixed thresholds don't account for market quality:
+- Tight spread (0.01) → small edge can still be actionable
+- Wide spread (0.04) → need bigger edge to cover friction
+
+Dynamic alpha automatically adjusts expectations based on current book quality.
+
+---
+
+## 10) Recommended parameters
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| `min_alpha` | 0.03 | Minimum edge threshold |
+| `spread_factor` | 1.5 | Alpha multiplier for spread |
+| `buffer` | 0.01 | Fixed buffer added to alpha |
+| `epsilon` | 0.01 | Exit convergence tolerance |
+| `Q_probe` | 100 | Default probe size for depth |
+| `primary_threshold` | 0.02 | Δp_ref to trigger evaluation |
+| `burst_threshold` | 0.05 | Δp_ref to trigger hot mode |
+| `hot_ttl_primary` | 60s | Hot mode duration (primary) |
+| `hot_ttl_burst` | 90s | Hot mode duration (burst) |
+| `league_poll_ms` | 1000 | OddsPapi batch poll interval |
+| `hot_poll_ms` | 500 | OddsPapi hot fixture interval |
+| `ewma_alpha` | 0.1 | Volatility smoothing factor |
+
+---
+
+## 11) Checklist: "Is this signal actionable?"
+
+A disagreement becomes a BUY alert only if:
+
+1. **Fresh data**: ref and PM snapshots are recent (WS connected, league poll active)
+2. **Correct mapping**: external match ↔ PM market/outcome is high confidence
+3. **Trigger fired**: Δp_ref >= threshold (primary/burst/adaptive) or lock toggle
+4. **Quality gate**: spread acceptable, depth sufficient
+5. **Alpha computed**: `alpha = max(0.03, 1.5 * spread + 0.01)`
+6. **Entry edge**: `p_ref - avg_fill >= alpha` after walking ask ladder
+7. **Logged**: store full event record for offline analysis
+
+A position becomes a SELL/EXIT signal when:
+
+1. **Exit condition**: `p_ref - bid <= epsilon` (market converged)
+2. **Or**: market closed/resolved
+
+---
+
+## Appendix: Implementation reference
+
+See `services/shared/edge.py` for:
+- `compute_alpha_entry(spread, min_alpha, spread_factor)`
+- `compute_avg_fill_price(asks, quantity)`
+- `compute_entry_edge(p_ref, asks, quantity, alpha)`
+- `compute_exit_signal(p_ref, bid, epsilon)`
+- `devig_two_way_decimal(odds_a, odds_b)`
+
+See `services/shared/fixture_state.py` for:
+- `FixtureStateManager` — p_ref history, EWMA σ, hot tracking
+- `TriggerEvent` — trigger type, delta, urgency
+
+See `services/shared/polymarket_ws.py` for:
+- `PolymarketWSManager` — WebSocket connection, book state
+- `BookState` — bid/ask/depth per token

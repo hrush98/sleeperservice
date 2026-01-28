@@ -16,6 +16,11 @@ Before implementing any meaningful change:
 4) Implement.
 5) Verify locally (commands + expected output).
 
+For anything related to the APIS: 
+@oddspape-guide.md
+@polymarket-gamma-guide.md
+@polymarket-clob-guide.md
+
 ## Core principles
 - Build in **small, testable vertical slices** (end-to-end > partial layers).
 - Prefer **simple, explicit code**; avoid premature frameworks and over-abstraction.

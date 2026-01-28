@@ -4,9 +4,10 @@ Live TUI monitor for LoL Lead-Lag Arbitrage Bot (read-only).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from threading import Lock, Thread
 
@@ -22,12 +23,24 @@ from types import SimpleNamespace
 
 from shared.config import settings
 from shared.db import SessionLocal
-from shared.edge import NetEdgeResult, compute_net_edges, devig_two_way_decimal
+from shared.edge import (
+    NetEdgeResult,
+    compute_alpha_entry,
+    compute_entry_edge,
+    compute_exit_signal,
+    compute_net_edges,
+    devig_two_way_decimal,
+)
+from shared.fixture_state import FixtureStateManager, TriggerEvent
 from shared.models import Fixture, Mapping
 from shared.oddspapi_client import OddsPapiClient
 from shared.polymarket_client import PolymarketClient
+from shared.polymarket_ws import BookState, PolymarketWSManager
 
 logger = logging.getLogger(__name__)
+
+PROBE_QUANTITY = 100.0
+TRIGGER_TTL_MINUTES = 30
 
 
 @dataclass
@@ -54,12 +67,14 @@ class MatchSnapshot:
     edge: NetEdgeResult
     updated_at: datetime
     ended: bool
+    is_live: bool
 
 
 @dataclass
 class LiveState:
     snapshots: list[MatchSnapshot]
     recently_ended: list[MatchSnapshot]
+    upcoming: list[MatchSnapshot]
     focus_match: MatchSnapshot | None
     focus_game1: MatchSnapshot | None
     last_update: datetime | None
@@ -75,6 +90,39 @@ class PerfStats:
     clob_batch_ms: float | None = None
     gamma_ms_total: float = 0.0
     gamma_calls: int = 0
+    oddspapi_last_batch: int = 0
+    ws_assets: int = 0
+    ws_books_fallback: int = 0
+
+
+@dataclass
+class TriggerRecord:
+    trigger: TriggerEvent
+    ts: datetime
+    logged: bool = False
+    entry_logged: bool = False
+    catchup_logged_sides: set[str] = field(default_factory=set)
+
+
+@dataclass
+class PaperTrade:
+    key: str
+    mapping_id: str
+    market_id: str
+    market_type: str | None
+    game_number: int | None
+    side: str
+    trigger_type: str | None
+    trigger_ts: datetime | None
+    entry_ts: datetime
+    entry_price: float
+    limit_price: float | None
+    size_available: float | None
+    quantity: float
+    alpha: float
+    net_edge: float | None
+    p_ref_entry: float | None
+    status: str = "open"
 
 
 class LogBuffer:
@@ -122,6 +170,493 @@ class LogBufferHandler(logging.Handler):
         self._buffer.add(message)
 
 
+class EventDrivenMonitor:
+    """Event-driven monitor using OddsPapi polling + Polymarket WS."""
+
+    def __init__(
+        self,
+        oddspapi: OddsPapiClient,
+        polymarket: PolymarketClient,
+        ws_manager: PolymarketWSManager,
+        fixture_states: FixtureStateManager,
+        state_lock: Lock,
+        live_state: LiveState,
+        log_buffer: LogBuffer,
+        alerts_buffer: LogBuffer,
+        trade_buffer: LogBuffer,
+        edge_threshold: float,
+        spread_factor: float,
+        min_confidence: float,
+        lookahead_minutes: int,
+        stale_minutes: int,
+    ) -> None:
+        self._oddspapi = oddspapi
+        self._polymarket = polymarket
+        self._ws_manager = ws_manager
+        self._fixture_states = fixture_states
+        self._state_lock = state_lock
+        self._live_state = live_state
+        self._log_buffer = log_buffer
+        self._alerts_buffer = alerts_buffer
+        self._trade_buffer = trade_buffer
+        self._edge_threshold = edge_threshold
+        self._spread_factor = spread_factor
+        self._min_confidence = min_confidence
+        self._lookahead_minutes = lookahead_minutes
+        self._stale_minutes = stale_minutes
+
+        self._stop = asyncio.Event()
+        self._candidates_lock = Lock()
+        self._candidates: list[tuple[Mapping, Fixture, Fixture, str]] = []
+        self._tournament_ids: list[int] = []
+        self._odds_cache: dict[str, dict] = {}
+        self._pm_status_cache: dict[str, tuple[datetime, dict]] = {}
+        self._pm_status_ttl = timedelta(seconds=5)
+        self._last_alert: dict[str, float] = {}
+        self._alert_cooldown = 30
+        self._perf_lock = Lock()
+        self._perf = PerfStats()
+        self._league_poll_ready = False
+        self._triggers: dict[str, TriggerRecord] = {}
+        self._open_trades: dict[str, PaperTrade] = {}
+
+    def start(self) -> Thread:
+        thread = Thread(target=self._run_loop, name="event-monitor", daemon=True)
+        thread.start()
+        return thread
+
+    def stop(self) -> None:
+        if not self._stop.is_set():
+            self._stop.set()
+
+    def _run_loop(self) -> None:
+        asyncio.run(self._main())
+
+    async def _main(self) -> None:
+        tasks = [
+            asyncio.create_task(self._ws_manager.run()),
+            asyncio.create_task(self._refresh_candidates_loop()),
+            asyncio.create_task(self._league_poll_loop()),
+            asyncio.create_task(self._hot_fixture_poll_loop()),
+            asyncio.create_task(self._snapshot_loop()),
+        ]
+        await asyncio.gather(*tasks)
+
+    async def _refresh_candidates_loop(self) -> None:
+        while not self._stop.is_set():
+            now = datetime.now(tz=timezone.utc)
+            candidates = await asyncio.to_thread(
+                self._load_candidates,
+                now,
+            )
+            tournament_ids: set[int] = set()
+            token_ids: set[str] = set()
+            for _, op_fixture, pm_fixture, _ in candidates:
+                tournament_id = _extract_tournament_id(op_fixture.raw_json or {})
+                if tournament_id is not None:
+                    tournament_ids.add(tournament_id)
+                token_ids.update(_parse_token_ids(pm_fixture.raw_json or {}))
+
+            await self._ws_manager.update_subscriptions(sorted(token_ids))
+
+            with self._candidates_lock:
+                self._candidates = candidates
+                self._tournament_ids = sorted(tournament_ids)
+
+            await asyncio.sleep(120.0)
+
+    async def _league_poll_loop(self) -> None:
+        while not self._stop.is_set():
+            tournament_ids = self._get_tournament_ids()
+            if not tournament_ids:
+                await asyncio.sleep(1.0)
+                continue
+            start = time.perf_counter()
+            odds_batch = await asyncio.to_thread(
+                self._oddspapi.get_odds_by_tournaments,
+                tournament_ids,
+            )
+            duration_ms = (time.perf_counter() - start) * 1000
+            with self._perf_lock:
+                self._perf.oddspapi_ms_total += duration_ms
+                self._perf.oddspapi_calls += 1
+                self._perf.oddspapi_last_batch = len(odds_batch)
+            self._league_poll_ready = True
+            for odds_payload in odds_batch:
+                fixture_id = str(odds_payload.get("fixtureId") or "")
+                if not fixture_id:
+                    continue
+                self._odds_cache[fixture_id] = odds_payload
+                p_ref_a, p_ref_b, _, _ = _extract_p_refs_from_odds(
+                    odds_payload, market_type="match_winner", game_number=None
+                )
+                trigger = self._fixture_states.update_p_ref(
+                    fixture_id,
+                    p_ref_a,
+                    p_ref_b,
+                )
+                if trigger:
+                    self._log_trigger(trigger)
+            await asyncio.sleep(1.0)
+
+    async def _hot_fixture_poll_loop(self) -> None:
+        while not self._stop.is_set():
+            hot_fixtures = self._fixture_states.get_hot_fixtures()
+            for fixture_id in hot_fixtures:
+                start = time.perf_counter()
+                odds_payload = await asyncio.to_thread(self._oddspapi.get_odds, fixture_id)
+                duration_ms = (time.perf_counter() - start) * 1000
+                with self._perf_lock:
+                    self._perf.oddspapi_ms_total += duration_ms
+                    self._perf.oddspapi_calls += 1
+                if isinstance(odds_payload, dict):
+                    self._odds_cache[fixture_id] = odds_payload
+                    p_ref_a, p_ref_b, _, _ = _extract_p_refs_from_odds(
+                        odds_payload, market_type="match_winner", game_number=None
+                    )
+                    trigger = self._fixture_states.update_p_ref(
+                        fixture_id,
+                        p_ref_a,
+                        p_ref_b,
+                    )
+                    if trigger:
+                        self._log_trigger(trigger)
+                await asyncio.sleep(settings.hot_fixture_poll_ms / 1000)
+            await asyncio.sleep(0.1)
+
+    async def _snapshot_loop(self) -> None:
+        while not self._stop.is_set():
+            loop_start = time.perf_counter()
+            now = datetime.now(tz=timezone.utc)
+            with self._candidates_lock:
+                candidates = list(self._candidates)
+            if not candidates:
+                await asyncio.sleep(1.0)
+                continue
+
+            ws_state = self._ws_manager.get_state_snapshot()
+            http_books: dict[str, BookState] = {}
+            required_tokens: set[str] = set()
+            for _, op_fixture, pm_fixture, _ in candidates:
+                if not op_fixture.raw_json:
+                    continue
+                required_tokens.update(_parse_token_ids(pm_fixture.raw_json or {}))
+            missing_tokens = [t for t in required_tokens if t and t not in ws_state]
+            if missing_tokens:
+                books_start = time.perf_counter()
+                books_by_token = await asyncio.to_thread(
+                    self._polymarket.get_orderbooks_batch, missing_tokens
+                )
+                books_ms = (time.perf_counter() - books_start) * 1000
+                http_books = _convert_books_to_state(books_by_token)
+                ws_state.update(http_books)
+                with self._perf_lock:
+                    self._perf.clob_batch_ms = books_ms
+                    self._perf.ws_books_fallback = len(http_books)
+
+            perf = self._snapshot_perf(len(ws_state))
+            live_snapshots: list[MatchSnapshot] = []
+            upcoming_snapshots: list[MatchSnapshot] = []
+            recently_ended: list[MatchSnapshot] = []
+            for mapping, op_fixture, pm_fixture, league_name in candidates:
+                odds_payload = self._odds_cache.get(str(op_fixture.source_id))
+                gamma_start = time.perf_counter()
+                pm_latest = await asyncio.to_thread(
+                    _get_pm_latest_cached,
+                    self._polymarket,
+                    self._pm_status_cache,
+                    str(pm_fixture.source_id),
+                    now,
+                    self._pm_status_ttl,
+                )
+                gamma_ms = (time.perf_counter() - gamma_start) * 1000
+                with self._perf_lock:
+                    self._perf.gamma_ms_total += gamma_ms
+                    self._perf.gamma_calls += 1
+                snapshot, ended = _build_snapshot_from_cache(
+                    mapping=mapping,
+                    op_fixture=op_fixture,
+                    pm_fixture=pm_fixture,
+                    odds_payload=odds_payload,
+                    pm_latest=pm_latest,
+                    ws_state=ws_state,
+                    spread_factor=self._spread_factor,
+                    now=now,
+                    league_name=league_name,
+                    stale_minutes=self._stale_minutes,
+                    log_buffer=self._log_buffer,
+                    league_poll_ready=self._league_poll_ready,
+                )
+                if snapshot:
+                    self._process_trade_signals(
+                        mapping=mapping,
+                        op_fixture=op_fixture,
+                        pm_fixture=pm_fixture,
+                        snapshot=snapshot,
+                        ws_state=ws_state,
+                        now=now,
+                        ended=ended,
+                    )
+                    if ended:
+                        recently_ended.append(snapshot)
+                    elif snapshot.is_live:
+                        live_snapshots.append(snapshot)
+                    else:
+                        upcoming_snapshots.append(snapshot)
+
+            focus_match, focus_game1 = _select_focuses(live_snapshots, recently_ended)
+
+            if (
+                focus_match
+                and focus_match.edge.best_edge is not None
+                and focus_match.edge.best_edge >= self._edge_threshold
+            ):
+                last_ts = self._last_alert.get(focus_match.mapping_id, 0.0)
+                if time.time() - last_ts >= self._alert_cooldown:
+                    alert_text = (
+                        f"{focus_match.match}: edge {focus_match.edge.best_edge:+.2%} "
+                        f"({focus_match.edge.best_side})"
+                    )
+                    self._last_alert[focus_match.mapping_id] = time.time()
+                    logger.info("ALERT %s", alert_text)
+                    self._alerts_buffer.add(alert_text)
+                    self._log_buffer.add(f"ALERT {alert_text}")
+            with self._state_lock:
+                self._live_state.snapshots = live_snapshots
+                self._live_state.recently_ended = recently_ended
+                self._live_state.upcoming = upcoming_snapshots
+                self._live_state.focus_match = focus_match
+                self._live_state.focus_game1 = focus_game1
+                self._live_state.last_update = now
+                self._live_state.perf = perf
+            loop_ms = (time.perf_counter() - loop_start) * 1000
+            with self._perf_lock:
+                self._perf.loop_ms = loop_ms
+            await asyncio.sleep(0.5)
+
+    def _load_candidates(
+        self,
+        now: datetime,
+    ) -> list[tuple[Mapping, Fixture, Fixture, str]]:
+        with SessionLocal() as db:
+            return _load_candidate_mappings(
+                db, now, self._lookahead_minutes, self._min_confidence, live_only=False
+            )
+
+    def _get_tournament_ids(self) -> list[int]:
+        with self._candidates_lock:
+            return list(getattr(self, "_tournament_ids", []))
+
+    def _log_trigger(self, trigger: TriggerEvent) -> None:
+        now = datetime.now(tz=timezone.utc)
+        self._triggers[trigger.fixture_id] = TriggerRecord(trigger=trigger, ts=now)
+        message = (
+            f"Trigger {trigger.trigger_type} fixture={trigger.fixture_id} "
+            f"delta_a={_format_delta(trigger.delta_p_ref_a)} "
+            f"delta_b={_format_delta(trigger.delta_p_ref_b)}"
+        )
+        self._log_buffer.add(message)
+
+    def _snapshot_perf(self, ws_assets: int) -> PerfStats:
+        with self._perf_lock:
+            snapshot = PerfStats(
+                loop_ms=self._perf.loop_ms,
+                oddspapi_ms_total=self._perf.oddspapi_ms_total,
+                oddspapi_calls=self._perf.oddspapi_calls,
+                clob_batch_ms=self._perf.clob_batch_ms,
+                gamma_ms_total=self._perf.gamma_ms_total,
+                gamma_calls=self._perf.gamma_calls,
+                oddspapi_last_batch=self._perf.oddspapi_last_batch,
+                ws_assets=ws_assets,
+                ws_books_fallback=self._perf.ws_books_fallback,
+            )
+            self._perf.clob_batch_ms = None
+            self._perf.ws_books_fallback = 0
+        return snapshot
+
+    def _process_trade_signals(
+        self,
+        mapping: Mapping,
+        op_fixture: Fixture,
+        pm_fixture: Fixture,
+        snapshot: MatchSnapshot,
+        ws_state: dict[str, BookState],
+        now: datetime,
+        ended: bool,
+    ) -> None:
+        fixture_id = str(op_fixture.source_id)
+        trigger_record = self._triggers.get(fixture_id)
+        if trigger_record and (now - trigger_record.ts) > timedelta(minutes=TRIGGER_TTL_MINUTES):
+            self._triggers.pop(fixture_id, None)
+            trigger_record = None
+
+        if trigger_record and not trigger_record.logged:
+            trigger = trigger_record.trigger
+            self._trade_buffer.add(
+                _format_trade_line(
+                    event="TRIGGER",
+                    match=snapshot.match,
+                    market_type=snapshot.market_type,
+                    game_number=snapshot.game_number,
+                    side=None,
+                    details=(
+                        f"type={trigger.trigger_type} "
+                        f"delta_a={_format_delta(trigger.delta_p_ref_a)} "
+                        f"delta_b={_format_delta(trigger.delta_p_ref_b)}"
+                    ),
+                )
+            )
+            trigger_record.logged = True
+
+        entry_candidates = _build_entry_candidates(op_fixture, pm_fixture, snapshot, ws_state)
+        if trigger_record and not trigger_record.entry_logged:
+            trigger_record.entry_logged = True
+            best = _select_best_candidate(entry_candidates)
+            if not best:
+                self._trade_buffer.add(
+                    _format_trade_line(
+                        event="ENTRY_CHECK",
+                        match=snapshot.match,
+                        market_type=snapshot.market_type,
+                        game_number=snapshot.game_number,
+                        side=None,
+                        details="no_depth",
+                    )
+                )
+            else:
+                side = best["side"]
+                entry = best["entry"]
+                key = _trade_key(mapping, pm_fixture, side)
+                if key in self._open_trades:
+                    self._trade_buffer.add(
+                        _format_trade_line(
+                            event="ENTRY_SKIP",
+                            match=snapshot.match,
+                            market_type=snapshot.market_type,
+                            game_number=snapshot.game_number,
+                            side=side,
+                            details="already_open",
+                        )
+                    )
+                elif entry["actionable"]:
+                    trade = PaperTrade(
+                        key=key,
+                        mapping_id=str(mapping.id),
+                        market_id=str(pm_fixture.id),
+                        market_type=snapshot.market_type,
+                        game_number=snapshot.game_number,
+                        side=side,
+                        trigger_type=trigger_record.trigger.trigger_type if trigger_record else None,
+                        trigger_ts=trigger_record.ts if trigger_record else None,
+                        entry_ts=now,
+                        entry_price=float(entry["avg_fill"]),
+                        limit_price=entry["limit_price"],
+                        size_available=entry["size_available"],
+                        quantity=PROBE_QUANTITY,
+                        alpha=float(best["alpha"]),
+                        net_edge=entry["net_edge"],
+                        p_ref_entry=best["p_ref"],
+                    )
+                    self._open_trades[key] = trade
+                    self._trade_buffer.add(
+                        _format_trade_line(
+                            event="ENTRY",
+                            match=snapshot.match,
+                            market_type=snapshot.market_type,
+                            game_number=snapshot.game_number,
+                            side=side,
+                            details=(
+                                f"avg_fill={trade.entry_price:.3f} "
+                                f"limit={trade.limit_price:.3f} "
+                                f"edge={_format_pct(trade.net_edge)} "
+                                f"alpha={trade.alpha:.3f} "
+                                f"size={trade.size_available:.0f}"
+                            ),
+                        )
+                    )
+                else:
+                    self._trade_buffer.add(
+                        _format_trade_line(
+                            event="ENTRY_SKIP",
+                            match=snapshot.match,
+                            market_type=snapshot.market_type,
+                            game_number=snapshot.game_number,
+                            side=side,
+                            details=(
+                                f"edge={_format_pct(entry['net_edge'])} "
+                                f"alpha={best['alpha']:.3f} "
+                                f"size={entry['size_available']:.0f}"
+                            ),
+                        )
+                    )
+
+        self._check_for_exits(mapping, pm_fixture, snapshot, now, ended, trigger_record)
+
+    def _check_for_exits(
+        self,
+        mapping: Mapping,
+        pm_fixture: Fixture,
+        snapshot: MatchSnapshot,
+        now: datetime,
+        ended: bool,
+        trigger_record: TriggerRecord | None,
+    ) -> None:
+        open_keys = [
+            key
+            for key, trade in self._open_trades.items()
+            if trade.mapping_id == str(mapping.id) and trade.market_id == str(pm_fixture.id)
+        ]
+        for key in open_keys:
+            trade = self._open_trades[key]
+            p_ref, bid = _select_p_ref_and_bid(trade.side, snapshot)
+            exit_signal = compute_exit_signal(p_ref, bid, settings.exit_epsilon) if not ended else True
+            if not exit_signal:
+                continue
+            exit_gap = (p_ref - bid) if p_ref is not None and bid is not None else None
+            catchup_s = _format_seconds(now - trade.trigger_ts) if trade.trigger_ts else "n/a"
+            hold_s = _format_seconds(now - trade.entry_ts)
+            reason = "market_ended" if ended else "convergence"
+            self._trade_buffer.add(
+                _format_trade_line(
+                    event="EXIT",
+                    match=snapshot.match,
+                    market_type=snapshot.market_type,
+                    game_number=snapshot.game_number,
+                    side=trade.side,
+                    details=(
+                        f"bid={_format_price(bid)} "
+                        f"gap={_format_pct(exit_gap)} "
+                        f"catchup={catchup_s} "
+                        f"hold={hold_s} "
+                        f"reason={reason}"
+                    ),
+                )
+            )
+            if trigger_record:
+                trigger_record.catchup_logged_sides.add(trade.side)
+            trade.status = "closed"
+            self._open_trades.pop(key, None)
+
+        if trigger_record:
+            for side in ("buy_a", "buy_b"):
+                if side in trigger_record.catchup_logged_sides:
+                    continue
+                p_ref, bid = _select_p_ref_and_bid(side, snapshot)
+                if not compute_exit_signal(p_ref, bid, settings.exit_epsilon):
+                    continue
+                trigger_record.catchup_logged_sides.add(side)
+                self._trade_buffer.add(
+                    _format_trade_line(
+                        event="CATCHUP",
+                        match=snapshot.match,
+                        market_type=snapshot.market_type,
+                        game_number=snapshot.game_number,
+                        side=side,
+                        details=f"time={_format_seconds(now - trigger_record.ts)}",
+                    )
+                )
+
+
 def _configure_logging_for_live(system_log_buffer: LogBuffer) -> None:
     root = logging.getLogger()
     for handler in list(root.handlers):
@@ -161,19 +696,15 @@ def live_command(
         global_cooldown_ms=settings.oddspapi_global_cooldown_ms_live
     )
     polymarket = PolymarketClient()
+    ws_manager = PolymarketWSManager()
+    fixture_states = FixtureStateManager()
 
-    alert_cooldown = 30
-    last_alert: dict[str, float] = {}
     alerts_buffer = LogBuffer(max_lines=6)
+    trade_buffer = LogBuffer(max_lines=10)
     log_buffer = LogBuffer(max_lines=8)
     log_buffer.add("Live monitor started")
     system_log_buffer = LogBuffer(max_lines=8)
     _configure_logging_for_live(system_log_buffer)
-    recently_ended: dict[str, MatchSnapshot] = {}
-    ended_ttl_seconds = 15 * 60
-    pm_status_cache: dict[str, tuple[datetime, dict]] = {}
-    pm_status_ttl = timedelta(seconds=5)
-
     layout = _build_layout()
 
     refresh_rate = max(10.0, 1.0 / interval)
@@ -181,6 +712,7 @@ def live_command(
     live_state = LiveState(
         snapshots=[],
         recently_ended=[],
+        upcoming=[],
         focus_match=None,
         focus_game1=None,
         last_update=None,
@@ -188,123 +720,23 @@ def live_command(
         perf=None,
     )
 
-    def data_loop() -> None:
-        last_candidates_refresh = 0.0
-        cached_candidates: list[tuple[Mapping, Fixture, Fixture, str]] = []
-        candidates_refresh_seconds = 120.0
-        while True:
-            loop_start = time.perf_counter()
-            now = datetime.now(tz=timezone.utc)
-            for key in list(recently_ended.keys()):
-                if (now - recently_ended[key].updated_at).total_seconds() > ended_ttl_seconds:
-                    recently_ended.pop(key, None)
-            with SessionLocal() as db:
-                refresh_due = (time.time() - last_candidates_refresh) >= candidates_refresh_seconds
-                if refresh_due or not cached_candidates:
-                    cached_candidates = _load_candidate_mappings(
-                        db, now, lookahead_minutes, min_confidence, live_only=False
-                    )
-                    last_candidates_refresh = time.time()
-                candidates = list(cached_candidates)
-            if not candidates:
-                log_buffer.add(
-                    f"No matches (min_confidence={min_confidence:.2f})",
-                    key="no-candidates",
-                    cooldown_seconds=30,
-                )
-
-            token_ids: list[str] = []
-            for _, _, pm_fixture, _ in candidates:
-                token_ids.extend(_parse_token_ids(pm_fixture.raw_json or {}))
-            perf = PerfStats()
-            books_start = time.perf_counter()
-            books_by_token = (
-                polymarket.get_orderbooks_batch(token_ids) if token_ids else {}
-            )
-            books_ms = (time.perf_counter() - books_start) * 1000
-            logger.info("perf clob_batch_ms=%.1f tokens=%d", books_ms, len(token_ids))
-            perf.clob_batch_ms = books_ms
-
-            live_snapshots: list[MatchSnapshot] = []
-            for mapping, op_fixture, pm_fixture, league_name in candidates:
-                try:
-                    gamma_start = time.perf_counter()
-                    pm_latest = _get_pm_latest_cached(
-                        polymarket,
-                        pm_status_cache,
-                        str(pm_fixture.source_id),
-                        now,
-                        pm_status_ttl,
-                    )
-                    gamma_ms = (time.perf_counter() - gamma_start) * 1000
-                    perf.gamma_ms_total += gamma_ms
-                    perf.gamma_calls += 1
-                    snapshot, ended = _build_snapshot(
-                        mapping=mapping,
-                        op_fixture=op_fixture,
-                        pm_fixture=pm_fixture,
-                        oddspapi=oddspapi,
-                        pm_latest=pm_latest,
-                        books_by_token=books_by_token,
-                        spread_factor=spread_factor,
-                        now=now,
-                        league_name=league_name,
-                        stale_minutes=stale_minutes,
-                        log_buffer=log_buffer,
-                        require_live=True,
-                        perf=perf,
-                    )
-                    if snapshot:
-                        if ended:
-                            recently_ended[mapping.id] = snapshot
-                        else:
-                            live_snapshots.append(snapshot)
-                except Exception as exc:  # pragma: no cover - defensive
-                    log_buffer.add(
-                        f"Error for {op_fixture.source_id}: {exc}",
-                        key=f"error:{op_fixture.source_id}",
-                        cooldown_seconds=30,
-                    )
-
-            focus_match, focus_game1 = _select_focuses(
-                live_snapshots, list(recently_ended.values())
-            )
-
-            # Alerting
-            if (
-                focus_match
-                and focus_match.edge.best_edge is not None
-                and focus_match.edge.best_edge >= edge_threshold
-            ):
-                last_ts = last_alert.get(focus_match.mapping_id, 0.0)
-                if time.time() - last_ts >= alert_cooldown:
-                    alert_text = (
-                        f"{focus_match.match}: edge {focus_match.edge.best_edge:+.2%} "
-                        f"({focus_match.edge.best_side})"
-                    )
-                    last_alert[focus_match.mapping_id] = time.time()
-                    logger.info("ALERT %s", alert_text)
-                    alerts_buffer.add(alert_text)
-                    log_buffer.add(f"ALERT {alert_text}")
-
-            loop_end = time.perf_counter()
-            loop_duration = loop_end - loop_start
-            logger.info("Loop duration: %.2fs", loop_duration)
-            perf.loop_ms = loop_duration * 1000
-
-            with state_lock:
-                live_state.snapshots = live_snapshots
-                live_state.recently_ended = list(recently_ended.values())
-                live_state.focus_match = focus_match
-                live_state.focus_game1 = focus_game1
-                live_state.last_update = now
-                live_state.last_loop_duration = loop_duration
-                live_state.perf = perf
-
-            time.sleep(interval)
-
-    data_thread = Thread(target=data_loop, name="live-data-loop", daemon=True)
-    data_thread.start()
+    monitor = EventDrivenMonitor(
+        oddspapi=oddspapi,
+        polymarket=polymarket,
+        ws_manager=ws_manager,
+        fixture_states=fixture_states,
+        state_lock=state_lock,
+        live_state=live_state,
+        log_buffer=log_buffer,
+        alerts_buffer=alerts_buffer,
+        trade_buffer=trade_buffer,
+        edge_threshold=edge_threshold,
+        spread_factor=spread_factor,
+        min_confidence=min_confidence,
+        lookahead_minutes=lookahead_minutes,
+        stale_minutes=stale_minutes,
+    )
+    monitor.start()
 
     ui_interval = min(1.0, interval)
     refresh_rate = max(2.0, 1.0 / ui_interval)
@@ -313,6 +745,7 @@ def live_command(
             with state_lock:
                 snapshots = list(live_state.snapshots)
                 recently_ended_list = list(live_state.recently_ended)
+                upcoming_list = list(live_state.upcoming)
                 focus_match = live_state.focus_match
                 focus_game1 = live_state.focus_game1
                 perf = live_state.perf
@@ -320,10 +753,12 @@ def live_command(
                 layout=layout,
                 snapshots=snapshots,
                 recently_ended=recently_ended_list,
+                upcoming=upcoming_list,
                 focus_match=focus_match,
                 focus_game1=focus_game1,
                 edge_threshold=edge_threshold,
                 alerts_buffer=alerts_buffer,
+                trade_buffer=trade_buffer,
                 log_buffer=log_buffer,
                 system_log_buffer=system_log_buffer,
                 spread_factor=spread_factor,
@@ -444,6 +879,7 @@ def _build_snapshot(
     pm_active = True
     pm_resolution = ""
     pm_winner = None
+    pm_ended = False
     odds_status_label = None
     odds_live = False
     try:
@@ -537,7 +973,8 @@ def _build_snapshot(
         pm_active = bool(pm_latest.get("active", True))
         pm_resolution = _extract_pm_resolution_status(pm_latest)
         pm_winner = _extract_pm_winner(pm_latest)
-        if _pm_is_ended(pm_latest, pm_closed, pm_active, pm_resolution, now, market_type):
+        pm_ended = _pm_is_ended(pm_latest, pm_closed, pm_active, pm_resolution, now, market_type)
+        if pm_ended:
             ended = True
         log_buffer.add(
             f"PM status {pm_fixture.source_id}: closed={pm_closed} active={pm_active} uma={pm_resolution or 'n/a'}",
@@ -585,7 +1022,7 @@ def _build_snapshot(
         mid_b = (bid_b + ask_b) / 2
 
     # If there is active orderbook liquidity, do not treat as ended.
-    if ended and (
+    if ended and not pm_ended and (
         (bid_a is not None or ask_a is not None) or (bid_b is not None or ask_b is not None)
     ):
         ended = False
@@ -608,7 +1045,7 @@ def _build_snapshot(
         )
         edge = NetEdgeResult(edge_buy_a=None, edge_buy_b=None, best_edge=None, best_side=None)
         match_name = f"{op_fixture.team_a_name} vs {op_fixture.team_b_name}"
-        display_status = odds_status_label or ("LIVE*" if odds_live else None) or pm_resolution
+        display_status = pm_resolution or odds_status_label or ("LIVE*" if odds_live else None)
         return MatchSnapshot(
             mapping_id=str(mapping.id),
             league=league_name,
@@ -632,6 +1069,7 @@ def _build_snapshot(
             edge=edge,
             updated_at=now,
             ended=True,
+            is_live=False,
         ), True
 
     edge = compute_net_edges(
@@ -646,7 +1084,7 @@ def _build_snapshot(
 
     match_name = f"{op_fixture.team_a_name} vs {op_fixture.team_b_name}"
 
-    display_status = odds_status_label or ("LIVE*" if odds_live else None) or pm_resolution
+    display_status = pm_resolution or odds_status_label or ("LIVE*" if odds_live else None)
     return MatchSnapshot(
         mapping_id=str(mapping.id),
         league=league_name,
@@ -670,6 +1108,203 @@ def _build_snapshot(
         edge=edge,
         updated_at=now,
         ended=False,
+        is_live=bool(odds_live),
+    ), False
+
+
+def _build_snapshot_from_cache(
+    mapping: Mapping,
+    op_fixture: Fixture,
+    pm_fixture: Fixture,
+    odds_payload: dict | None,
+    pm_latest: dict | None,
+    ws_state: dict[str, BookState],
+    spread_factor: float,
+    now: datetime,
+    league_name: str,
+    stale_minutes: int,
+    log_buffer: LogBuffer,
+    league_poll_ready: bool,
+) -> tuple[MatchSnapshot | None, bool]:
+    odds_a = None
+    odds_b = None
+    p_ref_a = None
+    p_ref_b = None
+    market_type = pm_fixture.market_type or "unknown"
+    game_number = pm_fixture.game_number
+    ended = False
+    pm_closed = False
+    pm_active = True
+    pm_resolution = ""
+    pm_winner = None
+    pm_ended = False
+    odds_status_label = None
+    odds_live = False
+
+    if isinstance(odds_payload, dict):
+        status_id = odds_payload.get("statusId")
+        if status_id in (2, 3):
+            ended = True
+        if status_id == 0 and market_type == "game_winner":
+            start_ref = pm_fixture.start_time or op_fixture.start_time
+            if start_ref:
+                since_start = now - start_ref
+            else:
+                since_start = None
+            if since_start and since_start.total_seconds() > stale_minutes * 60:
+                ended = True
+        p_ref_a, p_ref_b, odds_a, odds_b = _extract_p_refs_from_odds(
+            odds_payload,
+            market_type=market_type,
+            game_number=game_number,
+            op_fixture=op_fixture,
+            pm_fixture=pm_fixture,
+            log_buffer=log_buffer,
+        )
+        odds_changed_at = _latest_changed_at(
+            [
+                odds_payload.get("updatedAt"),
+            ]
+        )
+        odds_live = status_id == 1 or _recent_enough(odds_changed_at, now, minutes=10)
+        if status_id == 1:
+            odds_status_label = "LIVE"
+        elif status_id == 0:
+            odds_status_label = "PRE"
+        elif status_id is not None:
+            odds_status_label = f"ODDS {status_id}"
+        else:
+            odds_status_label = None
+    else:
+        if not league_poll_ready:
+            return None, False
+        log_buffer.add(
+            f"No OddsPapi cache for {op_fixture.source_id}",
+            key=f"odds-cache-miss:{op_fixture.source_id}",
+            cooldown_seconds=30,
+        )
+
+    if isinstance(pm_latest, dict):
+        pm_closed = bool(pm_latest.get("closed"))
+        pm_active = bool(pm_latest.get("active", True))
+        pm_resolution = _extract_pm_resolution_status(pm_latest)
+        pm_winner = _extract_pm_winner(pm_latest)
+        pm_ended = _pm_is_ended(pm_latest, pm_closed, pm_active, pm_resolution, now, market_type)
+        if pm_ended:
+            ended = True
+
+    outcomes = _parse_outcomes(pm_fixture.raw_json or {})
+    token_ids = _parse_token_ids(pm_fixture.raw_json or {})
+    outcome_pairs = _pair_outcomes_with_tokens(op_fixture, outcomes, token_ids)
+
+    source_note = "WS"
+    bid_a = ask_a = bid_b = ask_b = None
+    mid_a = mid_b = None
+
+    if outcome_pairs and all(p[1] for p in outcome_pairs):
+        for outcome_name, token_id in outcome_pairs:
+            book = ws_state.get(token_id)
+            bid = book.best_bid if book else None
+            ask = book.best_ask if book else None
+            if _is_team_a(op_fixture, outcome_name):
+                bid_a, ask_a = bid, ask
+            elif _is_team_b(op_fixture, outcome_name):
+                bid_b, ask_b = bid, ask
+        if len(outcome_pairs) >= 2:
+            if bid_a is None or ask_a is None:
+                book = ws_state.get(outcome_pairs[0][1])
+                bid_a, ask_a = (book.best_bid, book.best_ask) if book else (None, None)
+            if bid_b is None or ask_b is None:
+                book = ws_state.get(outcome_pairs[1][1])
+                bid_b, ask_b = (book.best_bid, book.best_ask) if book else (None, None)
+    else:
+        source_note = "No WS tokens"
+
+    if bid_a is not None and ask_a is not None:
+        mid_a = (bid_a + ask_a) / 2
+    if bid_b is not None and ask_b is not None:
+        mid_b = (bid_b + ask_b) / 2
+
+    if ended and not pm_ended and (
+        (bid_a is not None or ask_a is not None) or (bid_b is not None or ask_b is not None)
+    ):
+        ended = False
+        log_buffer.add(
+            f"Market re-opened (liquidity) {op_fixture.source_id} ({market_type}"
+            f"{' G'+str(game_number) if game_number else ''})",
+            key=f"ended-override:{op_fixture.source_id}:{market_type}:{game_number}",
+            cooldown_seconds=60,
+        )
+
+    if pm_fixture.raw_json and pm_fixture.raw_json.get("closed") is True:
+        ended = True
+
+    if ended:
+        edge = NetEdgeResult(edge_buy_a=None, edge_buy_b=None, best_edge=None, best_side=None)
+        match_name = f"{op_fixture.team_a_name} vs {op_fixture.team_b_name}"
+        display_status = pm_resolution or odds_status_label or ("LIVE*" if odds_live else None)
+        return MatchSnapshot(
+            mapping_id=str(mapping.id),
+            league=league_name,
+            match=match_name,
+            start_time=op_fixture.start_time,
+            market_type=market_type,
+            game_number=game_number,
+            pm_resolution_status=display_status,
+            pm_winner=pm_winner,
+            p_ref_a=p_ref_a,
+            p_ref_b=p_ref_b,
+            odds_a=odds_a,
+            odds_b=odds_b,
+            bid_a=bid_a,
+            ask_a=ask_a,
+            bid_b=bid_b,
+            ask_b=ask_b,
+            mid_a=mid_a,
+            mid_b=mid_b,
+            source_note=source_note,
+            edge=edge,
+            updated_at=now,
+            ended=True,
+            is_live=False,
+        ), True
+
+    edge = compute_net_edges(
+        p_ref_a=p_ref_a,
+        p_ref_b=p_ref_b,
+        bid_a=bid_a,
+        ask_a=ask_a,
+        bid_b=bid_b,
+        ask_b=ask_b,
+        spread_factor=spread_factor,
+    )
+
+    match_name = f"{op_fixture.team_a_name} vs {op_fixture.team_b_name}"
+    display_status = pm_resolution or odds_status_label or ("LIVE*" if odds_live else None)
+    return MatchSnapshot(
+        mapping_id=str(mapping.id),
+        league=league_name,
+        match=match_name,
+        start_time=op_fixture.start_time,
+        market_type=market_type,
+        game_number=game_number,
+        pm_resolution_status=display_status,
+        pm_winner=pm_winner,
+        p_ref_a=p_ref_a,
+        p_ref_b=p_ref_b,
+        odds_a=odds_a,
+        odds_b=odds_b,
+        bid_a=bid_a,
+        ask_a=ask_a,
+        bid_b=bid_b,
+        ask_b=ask_b,
+        mid_a=mid_a,
+        mid_b=mid_b,
+        source_note=source_note,
+        edge=edge,
+        updated_at=now,
+        ended=False,
+        is_live=bool(odds_live),
     ), False
 
 
@@ -677,15 +1312,17 @@ def _build_layout() -> Layout:
     layout = Layout()
     layout.split_column(
         Layout(name="main", ratio=4),
-        Layout(name="logs", size=22),
+        Layout(name="logs", size=24),
     )
     layout["logs"].split_column(
         Layout(name="log_stream", ratio=2),
+        Layout(name="trade_tape", ratio=2),
         Layout(name="system_logs", ratio=2),
         Layout(name="perf", ratio=1),
     )
     layout["main"].split_column(
         Layout(name="matches", ratio=1),
+        Layout(name="window", size=8),
         Layout(name="odds", ratio=3),
         Layout(name="alerts", ratio=1),
     )
@@ -700,10 +1337,12 @@ def _render_layout(
     layout: Layout,
     snapshots: list[MatchSnapshot],
     recently_ended: list[MatchSnapshot],
+    upcoming: list[MatchSnapshot],
     focus_match: MatchSnapshot | None,
     focus_game1: MatchSnapshot | None,
     edge_threshold: float,
     alerts_buffer: LogBuffer,
+    trade_buffer: LogBuffer,
     log_buffer: LogBuffer,
     system_log_buffer: LogBuffer,
     spread_factor: float,
@@ -711,8 +1350,14 @@ def _render_layout(
 ) -> None:
     layout["matches"].update(
         Panel(
-            _build_matches_table(snapshots, recently_ended, edge_threshold),
+            _build_matches_table(snapshots, edge_threshold),
             title="Live Matches",
+        )
+    )
+    layout["window"].update(
+        Panel(
+            _build_window_table(upcoming, recently_ended),
+            title="Upcoming / Recently Ended",
         )
     )
     layout["sharps"].update(
@@ -728,15 +1373,12 @@ def _render_layout(
     layout["poly"].update(Panel(_build_poly_panel(focus_match, focus_game1), title="Poly Odds"))
     layout["alerts"].update(Panel(_build_alerts_panel(alerts_buffer), title="Alerts"))
     layout["log_stream"].update(Panel(log_buffer.render(), title="Log Stream"))
+    layout["trade_tape"].update(Panel(trade_buffer.render(), title="Trade Tape"))
     layout["system_logs"].update(Panel(system_log_buffer.render(), title="System Logs"))
     layout["perf"].update(Panel(_build_perf_panel(perf), title="Performance"))
 
 
-def _build_matches_table(
-    snapshots: list[MatchSnapshot],
-    recently_ended: list[MatchSnapshot],
-    edge_threshold: float,
-) -> Table:
+def _build_matches_table(snapshots: list[MatchSnapshot], edge_threshold: float) -> Table:
     table = Table(show_header=True, header_style="bold")
     table.add_column("League", style="cyan", no_wrap=True)
     table.add_column("Match")
@@ -748,28 +1390,7 @@ def _build_matches_table(
     table.add_column("Result", no_wrap=True)
 
     if not snapshots:
-        if recently_ended:
-            table.add_row(
-                "-", "No Matches Live and Recently Ended", "-", "-", "-", "-", "-", "-"
-            )
-        else:
-            table.add_row("-", "No Matches Live", "-", "-", "-", "-", "-", "-")
-
-    for ended in recently_ended:
-        market_label = _format_market_label(ended.market_type, ended.game_number)
-        status_label = ended.pm_resolution_status or "ENDED"
-        winner = _format_pm_winner(ended.pm_winner)
-        table.add_row(
-            ended.league or "-",
-            ended.match,
-            market_label,
-            "--:--",
-            status_label,
-            "-",
-            "-",
-            winner,
-            style="dim",
-        )
+        table.add_row("-", "No Matches Live", "-", "-", "-", "-", "-", "-")
 
     for snap in snapshots:
         edge = snap.edge.best_edge
@@ -791,6 +1412,51 @@ def _build_matches_table(
             side,
             winner,
             style=style,
+        )
+    return table
+
+
+def _build_window_table(
+    upcoming: list[MatchSnapshot],
+    recently_ended: list[MatchSnapshot],
+) -> Table:
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("Type", no_wrap=True)
+    table.add_column("Match")
+    table.add_column("Market", no_wrap=True)
+    table.add_column("Start", no_wrap=True)
+    table.add_column("Status", no_wrap=True)
+    table.add_column("Result", no_wrap=True)
+
+    if not upcoming and not recently_ended:
+        table.add_row("-", "No Upcoming or Recently Ended", "-", "-", "-", "-")
+        return table
+
+    for ended in recently_ended[:3]:
+        market_label = _format_market_label(ended.market_type, ended.game_number)
+        status_label = ended.pm_resolution_status or "ENDED"
+        winner = _format_pm_winner(ended.pm_winner)
+        table.add_row(
+            "ENDED",
+            ended.match,
+            market_label,
+            "--:--",
+            status_label,
+            winner,
+            style="dim",
+        )
+
+    for snap in upcoming[:3]:
+        market_label = _format_market_label(snap.market_type, snap.game_number)
+        status_label = snap.pm_resolution_status or "PRE"
+        start_str = snap.start_time.strftime("%H:%M") if snap.start_time else "--:--"
+        table.add_row(
+            "UPCOMING",
+            snap.match,
+            market_label,
+            start_str,
+            status_label,
+            "-",
         )
     return table
 
@@ -856,8 +1522,12 @@ def _build_perf_panel(perf: PerfStats | None) -> Text:
     gamma_calls = perf.gamma_calls
     gamma_avg = (gamma_total / gamma_calls) if gamma_calls else 0.0
     text.append(f"Total Loop: {loop_ms/1000:.2f}s\n")
-    text.append(f"OddsPapi:  {odds_total:.0f}ms ({odds_calls} calls, {odds_avg:.0f}ms avg)\n")
-    text.append(f"CLOB:      {clob_ms:.0f}ms\n")
+    text.append(
+        f"OddsPapi:  {odds_total:.0f}ms ({odds_calls} calls, {odds_avg:.0f}ms avg, "
+        f"last batch={perf.oddspapi_last_batch})\n"
+    )
+    text.append(f"CLOB:      {clob_ms:.0f}ms (fallback books={perf.ws_books_fallback})\n")
+    text.append(f"WS Books:  {perf.ws_assets}\n")
     text.append(f"Gamma:     {gamma_total:.0f}ms ({gamma_calls} calls, {gamma_avg:.0f}ms avg)\n")
     return text
 
@@ -954,6 +1624,90 @@ def _parse_outcomes(raw: dict) -> list[str]:
     return [str(o) for o in outcomes if o]
 
 
+def _convert_books_to_state(books_by_token: dict[str, dict]) -> dict[str, BookState]:
+    results: dict[str, BookState] = {}
+    for token_id, book in books_by_token.items():
+        bids = [(float(b["price"]), float(b["size"])) for b in book.get("bids", [])]
+        asks = [(float(a["price"]), float(a["size"])) for a in book.get("asks", [])]
+        best_bid = book.get("best_bid")
+        best_ask = book.get("best_ask")
+        spread = None
+        if best_bid is not None and best_ask is not None:
+            spread = max(best_ask - best_bid, 0.0)
+        results[token_id] = BookState(
+            asset_id=token_id,
+            best_bid=best_bid,
+            best_ask=best_ask,
+            spread=spread,
+            bids=bids,
+            asks=asks,
+            timestamp=datetime.now(tz=timezone.utc),
+            hash=None,
+        )
+    return results
+
+
+def _extract_tournament_id(raw: dict) -> int | None:
+    for key in ("tournamentId", "tournament_id"):
+        value = raw.get(key)
+        if value is not None:
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+def _extract_p_refs_from_odds(
+    odds_payload: dict,
+    market_type: str,
+    game_number: int | None,
+    op_fixture: Fixture | None = None,
+    pm_fixture: Fixture | None = None,
+    log_buffer: LogBuffer | None = None,
+) -> tuple[float | None, float | None, float | None, float | None]:
+    odds_a = None
+    odds_b = None
+    p_ref_a = None
+    p_ref_b = None
+    if market_type == "match_winner":
+        pinnacle_odds = OddsPapiClient.extract_pinnacle_moneyline(odds_payload)
+    elif market_type == "game_winner" and game_number:
+        pinnacle_odds = OddsPapiClient.extract_pinnacle_game_winner(
+            odds_payload,
+            game_number,
+        )
+        if not pinnacle_odds and pm_fixture:
+            series_len = _series_length(getattr(pm_fixture, "series_type", None))
+            moneyline = OddsPapiClient.extract_pinnacle_moneyline(odds_payload)
+            if moneyline and series_len and game_number == series_len:
+                pinnacle_odds = moneyline
+                if log_buffer and op_fixture:
+                    log_buffer.add(
+                        f"OddsPapi: using match moneyline for final game {game_number} "
+                        f"({op_fixture.source_id})",
+                        key=f"odds-final-game:{op_fixture.source_id}:{game_number}",
+                        cooldown_seconds=120,
+                    )
+    else:
+        pinnacle_odds = {}
+
+    home = pinnacle_odds.get("home")
+    away = pinnacle_odds.get("away")
+    if home and away:
+        odds_a = home.get("price")
+        odds_b = away.get("price")
+        if odds_a is not None and odds_b is not None:
+            p_ref_a, p_ref_b = devig_two_way_decimal(odds_a, odds_b)
+    return p_ref_a, p_ref_b, odds_a, odds_b
+
+
+def _format_delta(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:+.3f}"
+
+
 def _parse_token_ids(raw: dict) -> list[str]:
     token_ids = raw.get("clobTokenIds") or []
     if isinstance(token_ids, str):
@@ -1040,7 +1794,7 @@ def _pm_is_ended(
             if end_dt.tzinfo is None:
                 end_dt = end_dt.replace(tzinfo=timezone.utc)
             if end_dt <= now:
-                return market_type == "game_winner"
+                return True
         except ValueError:
             pass
     return False
@@ -1133,6 +1887,118 @@ def _append_compare_focus(text: Text, snap: MatchSnapshot, spread_factor: float)
             f"  COMPARE B: {snap.p_ref_b:.3f} vs {snap.ask_b:.3f} → {edge_b:+.3f}\n",
             style="bold green" if edge_b > 0 else "bold red",
         )
+
+
+def _build_entry_candidates(
+    op_fixture: Fixture,
+    pm_fixture: Fixture,
+    snapshot: MatchSnapshot,
+    ws_state: dict[str, BookState],
+) -> list[dict]:
+    books = _resolve_books(op_fixture, pm_fixture, ws_state)
+    candidates: list[dict] = []
+    for side, p_ref in (("buy_a", snapshot.p_ref_a), ("buy_b", snapshot.p_ref_b)):
+        book = books.get(side)
+        candidate = _build_entry_candidate(side, p_ref, book)
+        if candidate:
+            candidates.append(candidate)
+    return candidates
+
+
+def _resolve_books(
+    op_fixture: Fixture,
+    pm_fixture: Fixture,
+    ws_state: dict[str, BookState],
+) -> dict[str, BookState | None]:
+    outcomes = _parse_outcomes(pm_fixture.raw_json or {})
+    token_ids = _parse_token_ids(pm_fixture.raw_json or {})
+    outcome_pairs = _pair_outcomes_with_tokens(op_fixture, outcomes, token_ids)
+    books: dict[str, BookState | None] = {"buy_a": None, "buy_b": None}
+    for outcome_name, token_id in outcome_pairs:
+        if not token_id:
+            continue
+        book = ws_state.get(token_id)
+        if not book:
+            continue
+        if _is_team_a(op_fixture, outcome_name):
+            books["buy_a"] = book
+        elif _is_team_b(op_fixture, outcome_name):
+            books["buy_b"] = book
+    if len(outcome_pairs) >= 2:
+        if books["buy_a"] is None:
+            books["buy_a"] = ws_state.get(outcome_pairs[0][1])
+        if books["buy_b"] is None:
+            books["buy_b"] = ws_state.get(outcome_pairs[1][1])
+    return books
+
+
+def _build_entry_candidate(
+    side: str,
+    p_ref: float | None,
+    book: BookState | None,
+) -> dict | None:
+    if not book or p_ref is None:
+        return None
+    bid = book.best_bid
+    ask = book.best_ask
+    if bid is None or ask is None:
+        return None
+    spread = max(ask - bid, 0.0)
+    alpha = compute_alpha_entry(spread, settings.alpha_min, settings.alpha_spread_factor)
+    entry = compute_entry_edge(p_ref, book.asks, PROBE_QUANTITY, alpha)
+    return {"side": side, "p_ref": p_ref, "alpha": alpha, "entry": entry}
+
+
+def _select_best_candidate(candidates: list[dict]) -> dict | None:
+    if not candidates:
+        return None
+
+    def _score(candidate: dict) -> float:
+        net_edge = candidate["entry"].get("net_edge")
+        return net_edge if isinstance(net_edge, (int, float)) else -1.0
+
+    return max(candidates, key=_score)
+
+
+def _select_p_ref_and_bid(side: str, snapshot: MatchSnapshot) -> tuple[float | None, float | None]:
+    if side == "buy_a":
+        return snapshot.p_ref_a, snapshot.bid_a
+    return snapshot.p_ref_b, snapshot.bid_b
+
+
+def _trade_key(mapping: Mapping, pm_fixture: Fixture, side: str) -> str:
+    return f"{mapping.id}:{pm_fixture.id}:{side}"
+
+
+def _format_trade_line(
+    event: str,
+    match: str,
+    market_type: str | None,
+    game_number: int | None,
+    side: str | None,
+    details: str,
+) -> str:
+    market_label = _format_market_label(market_type, game_number)
+    side_label = side.upper() if side else "-"
+    return f"{event:<10} {match} | {market_label} | {side_label} | {details}"
+
+
+def _format_pct(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:+.2%}"
+
+
+def _format_price(value: float | None) -> str:
+    if value is None:
+        return "n/a"
+    return f"{value:.3f}"
+
+
+def _format_seconds(delta: timedelta | None) -> str:
+    if not delta:
+        return "n/a"
+    return f"{delta.total_seconds():.1f}s"
 
 
 def _extract_pm_winner(pm_latest: dict) -> str | None:

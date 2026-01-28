@@ -3,7 +3,7 @@ CLI entry point for LoL Lead-Lag Arbitrage Bot.
 
 Usage:
     python -m cli discover --days 7
-    python -m cli monitor
+    python -m cli live
 """
 
 import logging
@@ -13,7 +13,6 @@ import typer
 
 from cli.discover import discover_command
 from cli.live import live_command
-from cli.monitor import monitor_command
 
 # Configure logging
 logging.basicConfig(
@@ -53,33 +52,6 @@ def discover(
     except Exception as e:
         typer.secho(f"Error: {e}", fg=typer.colors.RED, err=True)
         logging.exception("Discovery failed")
-        raise typer.Exit(code=1)
-
-
-@app.command()
-def monitor(
-    interval: int = typer.Option(5, "--interval", "-i", help="Poll interval in seconds"),
-    threshold: float = typer.Option(0.05, "--threshold", "-t", help="Gap threshold for shadow orders"),
-    verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose logging"),
-):
-    """
-    Monitor live matches and compare odds.
-
-    Watches mapped matches that are live, compares Pinnacle odds
-    with Polymarket CLOB prices, and records shadow orders when
-    gaps exceed the threshold.
-    """
-    if verbose:
-        logging.getLogger().setLevel(logging.DEBUG)
-
-    try:
-        monitor_command(interval=interval, threshold=threshold)
-    except KeyboardInterrupt:
-        typer.echo("\nMonitoring stopped.")
-        raise typer.Exit(code=0)
-    except Exception as e:
-        typer.secho(f"Error: {e}", fg=typer.colors.RED, err=True)
-        logging.exception("Monitoring failed")
         raise typer.Exit(code=1)
 
 

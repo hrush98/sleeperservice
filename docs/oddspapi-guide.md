@@ -265,6 +265,30 @@ Each player entry commonly includes:
 
 ---
 
+## 7) GET /v4/odds-by-tournaments
+
+Retrieve odds for **all fixtures** in a specified tournament.
+
+### Endpoint
+- `GET /v4/odds-by-tournaments`
+
+### Query params
+- `tournamentIds` (string, required): comma-separated list of tournament IDs
+- `bookmaker` (string, required): bookmaker slug (e.g., `pinnacle`)
+- `verbosity` (number, optional)
+- `oddsFormat` (string, optional): `decimal | american | fractional`
+
+### Example
+- `GET /v4/odds-by-tournaments?tournamentIds=17&bookmaker=pinnacle&oddsFormat=decimal&verbosity=3`
+
+### Response overview
+- Array of fixture objects (same shape as `/v4/odds`), but batched per tournament.
+
+### Cooldown
+- **1000ms**
+
+---
+
 ## Recommended call flow (common usage)
 
 1. `/sports`  

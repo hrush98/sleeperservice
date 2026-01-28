@@ -89,22 +89,24 @@ Store mapping with confidence score for the event; markets join via parent_fixtu
 
 **When to run:** When mapped matches are live.
 
-### Flow
+### Flow (event-driven)
 ```
-For each mapping where fixture.status == "live":
-    1. GET /v4/odds?fixtureId=X (OddsPapi)
-       → Extract Pinnacle moneyline + game winner (Game 1/2/3)
-    
-    2. GET Polymarket CLOB orderbook for each market
-       → Extract best_bid, best_ask → mid price
-    
-    3. Compute gap per market = pinnacle_implied_prob - polymarket_mid
-    
-    4. If abs(gap) > threshold:
-       → Record shadow_order
-       → Log to console
-    
-    5. Store odds_snapshot (both sources)
+1. League poll (OddsPapi):
+   GET /v4/odds-by-tournaments?tournamentIds=... @ 1s
+   → Update p_ref per fixture
+   → Detect Δp_ref triggers
+
+2. Hot fixture poll (OddsPapi):
+   GET /v4/odds?fixtureId=X @ 500ms (only for hot fixtures)
+   → Refresh p_ref with finer cadence
+
+3. Polymarket WebSocket:
+   wss://ws-subscriptions-clob.polymarket.com/ws/market
+   → Maintain top-of-book + depth in memory
+
+4. Compare:
+   p_ref vs PM ask/bid
+   → Compute edge, alert when actionable
 ```
 
 ### Console output (example)
@@ -135,11 +137,12 @@ Polymarket ──► leagues, teams, fixtures (source="polymarket")
 
 ### Live Monitor
 ```
-OddsPapi /odds ──► odds_snapshots (source="oddspapi")
-Polymarket CLOB ──► odds_snapshots (source="polymarket_clob")
-                         │
-                         v (if gap > threshold)
-                    shadow_orders
+OddsPapi /odds-by-tournaments ──► p_ref updates (in-memory)
+OddsPapi /odds (hot only) ──────► p_ref updates (in-memory)
+Polymarket WS book state ───────► top-of-book + depth (in-memory)
+                                   │
+                                   v (if edge > threshold)
+                              shadow_orders / alerts
 ```
 
 ---

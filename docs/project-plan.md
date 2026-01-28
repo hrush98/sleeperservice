@@ -165,11 +165,13 @@ OddsPapi sportId for LoL: **18**
 - CLI: `discover --days N`
 - Verification: See leagues, teams, fixtures, mappings in DB
 
-### M2 — Live Monitor (basic)
-- Implement OddsPapi odds polling
-- Implement Polymarket CLOB polling
-- Compare and compute gap
-- Record shadow orders
+### M2 — Live Monitor (event-driven)
+- Implement OddsPapi league polling via `/v4/odds-by-tournaments` (1s cadence)
+- Implement hot fixture polling via `/v4/odds` (500ms when triggered)
+- Implement Polymarket WS book state (top-of-book + depth in memory)
+- Trigger on Δp_ref thresholds + lock/unlock
+- Compare and compute edge using PM bid/ask
+- Record shadow orders / alerts
 - CLI: `monitor` (watches live matches)
 
 ### M3 — Observability
@@ -226,7 +228,7 @@ python -m cli discover --days 7
 ### Live Monitor
 ```bash
 python -m cli monitor
-# Should output: watching N live matches, gap updates every X seconds
+# Should output: WS connected, league polling, hot fixtures when triggered
 ```
 
 ### API

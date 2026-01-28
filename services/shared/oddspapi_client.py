@@ -20,6 +20,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any
 
+import threading
+
 import httpx
 
 from shared.config import settings
@@ -84,6 +86,11 @@ class OddsPapiClient:
         self._cooldown = CooldownTracker(
             global_cooldown_ms or settings.oddspapi_global_cooldown_ms_discovery
         )
+        self._client = httpx.Client(timeout=30)
+        self._client_lock = threading.Lock()
+
+    def close(self) -> None:
+        self._client.close()
 
     def _auth_params(self) -> dict[str, str]:
         """Return auth params for OddsPapi (apiKey query param)."""
@@ -112,8 +119,8 @@ class OddsPapiClient:
                 attempt + 1,
             )
 
-            with httpx.Client(timeout=30) as client:
-                response = client.get(url, params=all_params)
+            with self._client_lock:
+                response = self._client.get(url, params=all_params)
 
                 if response.status_code == 429:
                     # Rate limited - exponential backoff
@@ -264,6 +271,45 @@ class OddsPapiClient:
             return data
 
         return {"raw": data, "fetched_at": datetime.now(tz=timezone.utc).isoformat()}
+
+    def get_odds_by_tournaments(
+        self,
+        tournament_ids: list[int],
+        bookmaker: str = "pinnacle",
+        odds_format: str = "decimal",
+        verbosity: int = 3,
+    ) -> list[dict]:
+        """
+        Get odds for all fixtures in specified tournaments.
+
+        Args:
+            tournament_ids: List of tournament IDs.
+            bookmaker: Bookmaker slug (e.g., "pinnacle").
+            odds_format: decimal | american | fractional.
+            verbosity: Response verbosity.
+        """
+        if not tournament_ids:
+            return []
+
+        params = {
+            "tournamentIds": ",".join(str(t) for t in tournament_ids),
+            "bookmaker": bookmaker,
+            "oddsFormat": odds_format,
+            "verbosity": verbosity,
+        }
+
+        data = self._request(
+            "/v4/odds-by-tournaments",
+            params,
+            settings.cooldown_odds_by_tournaments_ms,
+        )
+
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
+            return data["data"]
+
+        return []
 
     @staticmethod
     def extract_pinnacle_moneyline(odds_payload: dict) -> dict[str, Any]:

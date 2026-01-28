@@ -15,8 +15,9 @@ Polymarket game bets tag_id: 100639
 """
 
 import logging
-from datetime import datetime, timezone
 from typing import Any
+
+import threading
 
 import httpx
 
@@ -37,6 +38,11 @@ class PolymarketClient:
         self.gamma_url = gamma_url or settings.polymarket_base_url
         self.clob_url = clob_url or settings.polymarket_clob_url
         self.api_key = api_key or settings.poly_api_key
+        self._client = httpx.Client(timeout=30)
+        self._client_lock = threading.Lock()
+
+    def close(self) -> None:
+        self._client.close()
 
     def _gamma_request(self, endpoint: str, params: dict[str, Any] | None = None) -> Any:
         """Make a GET request to Gamma API."""
@@ -47,8 +53,8 @@ class PolymarketClient:
 
         logger.debug("Polymarket Gamma request: %s params=%s", endpoint, params)
 
-        with httpx.Client(timeout=30) as client:
-            response = client.get(url, params=params or {}, headers=headers)
+        with self._client_lock:
+            response = self._client.get(url, params=params or {}, headers=headers)
             response.raise_for_status()
             return response.json()
 
@@ -61,8 +67,8 @@ class PolymarketClient:
 
         logger.debug("Polymarket CLOB request: %s params=%s", endpoint, params)
 
-        with httpx.Client(timeout=30) as client:
-            response = client.get(url, params=params or {}, headers=headers)
+        with self._client_lock:
+            response = self._client.get(url, params=params or {}, headers=headers)
             response.raise_for_status()
             return response.json()
 
@@ -75,8 +81,8 @@ class PolymarketClient:
 
         logger.debug("Polymarket CLOB POST request: %s items=%d", endpoint, len(payload))
 
-        with httpx.Client(timeout=30) as client:
-            response = client.post(url, json=payload, headers=headers)
+        with self._client_lock:
+            response = self._client.post(url, json=payload, headers=headers)
             response.raise_for_status()
             return response.json()
 

@@ -70,3 +70,77 @@ def compute_net_edges(
 
     return NetEdgeResult(edge_buy_a=edge_a, edge_buy_b=edge_b, best_edge=best_edge, best_side=best_side)
 
+
+def compute_alpha_entry(spread: float, min_alpha: float = 0.03, spread_factor: float = 1.5) -> float:
+    """alpha = max(min_alpha, spread_factor * spread + 0.01)."""
+    return max(min_alpha, (spread_factor * spread) + 0.01)
+
+
+def compute_avg_fill_price(asks: list[tuple[float, float]], quantity: float) -> float | None:
+    """Walk the ask ladder to compute expected average fill for quantity shares."""
+    if quantity <= 0 or not asks:
+        return None
+    remaining = quantity
+    total_cost = 0.0
+    filled = 0.0
+    for price, size in asks:
+        if remaining <= 0:
+            break
+        take = min(size, remaining)
+        total_cost += price * take
+        filled += take
+        remaining -= take
+    if filled <= 0:
+        return None
+    return total_cost / filled
+
+
+def compute_entry_edge(
+    p_ref: float | None,
+    asks: list[tuple[float, float]],
+    quantity: float,
+    alpha: float,
+) -> dict[str, float | None | bool]:
+    """
+    Compute entry edge using depth-aware average fill.
+
+    Returns:
+        actionable: bool
+        limit_price: float
+        size_available: float
+        avg_fill: float | None
+        net_edge: float | None
+    """
+    if p_ref is None:
+        return {
+            "actionable": False,
+            "limit_price": None,
+            "size_available": 0.0,
+            "avg_fill": None,
+            "net_edge": None,
+        }
+    limit_price = p_ref - alpha
+    size_available = 0.0
+    for price, size in asks:
+        if price <= limit_price:
+            size_available += size
+        else:
+            break
+    avg_fill = compute_avg_fill_price(asks, min(quantity, size_available)) if size_available else None
+    net_edge = (p_ref - avg_fill) if avg_fill is not None else None
+    actionable = avg_fill is not None and net_edge is not None and net_edge >= alpha
+    return {
+        "actionable": actionable,
+        "limit_price": limit_price,
+        "size_available": size_available,
+        "avg_fill": avg_fill,
+        "net_edge": net_edge,
+    }
+
+
+def compute_exit_signal(p_ref: float | None, bid: float | None, epsilon: float = 0.01) -> bool:
+    """Exit when p_ref - bid <= epsilon."""
+    if p_ref is None or bid is None:
+        return False
+    return (p_ref - bid) <= epsilon
+
