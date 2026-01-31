@@ -61,6 +61,11 @@ class Settings(BaseSettings):
     hot_fixture_poll_ms: int = 500
     hot_fixture_ttl_seconds: int = 60
 
+    # Live concurrency caps (async)
+    oddspapi_max_concurrent_live: int = 4
+    polymarket_gamma_max_concurrent_live: int = 4
+    polymarket_clob_max_concurrent_live: int = 2
+
     # Trigger thresholds
     trigger_primary_threshold: float = 0.02
     trigger_burst_threshold: float = 0.05

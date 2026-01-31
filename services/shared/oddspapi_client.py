@@ -14,6 +14,7 @@ Cooldowns (per endpoint):
 - /v4/odds: 500ms
 """
 
+import asyncio
 import logging
 import re
 import time
@@ -510,6 +511,229 @@ class OddsPapiClient:
             3: "cancelled",  # Cancelled
         }
         return status_map.get(status_id, "upcoming") if status_id is not None else "upcoming"
+
+
+class AsyncCooldownTracker:
+    """
+    Async cooldown tracker for OddsPapi.
+
+    Serializes waits to respect global + per-endpoint cooldowns.
+    """
+
+    def __init__(self, global_cooldown_ms: int):
+        self._last_call: dict[str, float] = {}
+        self._last_global: float = 0
+        self._global_cooldown_ms: int = global_cooldown_ms
+        self._lock = asyncio.Lock()
+
+    async def wait(self, endpoint: str, cooldown_ms: int) -> None:
+        async with self._lock:
+            now = time.time()
+            global_elapsed_ms = (now - self._last_global) * 1000
+            if global_elapsed_ms < self._global_cooldown_ms:
+                sleep_ms = self._global_cooldown_ms - global_elapsed_ms
+                logger.debug("Global cooldown: sleeping %.0fms", sleep_ms)
+                await asyncio.sleep(sleep_ms / 1000)
+                now = time.time()
+
+            last = self._last_call.get(endpoint, 0)
+            elapsed_ms = (now - last) * 1000
+            if elapsed_ms < cooldown_ms:
+                sleep_ms = cooldown_ms - elapsed_ms
+                logger.debug("Endpoint cooldown: sleeping %.0fms for %s", sleep_ms, endpoint)
+                await asyncio.sleep(sleep_ms / 1000)
+
+            self._last_call[endpoint] = time.time()
+            self._last_global = time.time()
+
+
+class AsyncOddsPapiClient:
+    """Async client for OddsPapi v4 API focused on LoL esports."""
+
+    MAX_RETRIES = 3
+    RETRY_BACKOFF_BASE = 2.0  # seconds
+
+    def __init__(
+        self,
+        base_url: str | None = None,
+        api_key: str | None = None,
+        sport_id: int | None = None,
+        global_cooldown_ms: int | None = None,
+    ):
+        self.base_url = base_url or settings.oddspapi_base_url
+        self.api_key = api_key or settings.odds_api_key
+        self.sport_id = sport_id or settings.oddspapi_lol_sport_id
+        self._cooldown = AsyncCooldownTracker(
+            global_cooldown_ms or settings.oddspapi_global_cooldown_ms_discovery
+        )
+        self._client = httpx.AsyncClient(timeout=30)
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+    def _auth_params(self) -> dict[str, str]:
+        if not self.api_key:
+            return {}
+        return {"apiKey": self.api_key}
+
+    async def _request(
+        self,
+        endpoint: str,
+        params: dict[str, Any],
+        cooldown_ms: int,
+    ) -> Any:
+        url = f"{self.base_url}{endpoint}"
+        all_params = {**params, **self._auth_params()}
+
+        for attempt in range(self.MAX_RETRIES):
+            await self._cooldown.wait(endpoint, cooldown_ms)
+
+            logger.debug(
+                "OddsPapi request: %s params=%s (attempt %d)",
+                endpoint,
+                {k: v for k, v in all_params.items() if k != "apiKey"},
+                attempt + 1,
+            )
+
+            response = await self._client.get(url, params=all_params)
+
+            if response.status_code == 429:
+                backoff = self.RETRY_BACKOFF_BASE * (2 ** attempt)
+                logger.warning(
+                    "Rate limited (429) on %s, backing off %.1fs (attempt %d/%d)",
+                    endpoint,
+                    backoff,
+                    attempt + 1,
+                    self.MAX_RETRIES,
+                )
+                await asyncio.sleep(backoff)
+                continue
+
+            response.raise_for_status()
+            return response.json()
+
+        raise httpx.HTTPStatusError(
+            f"Rate limited after {self.MAX_RETRIES} retries",
+            request=response.request,
+            response=response,
+        )
+
+    async def get_tournaments(self, language: str = "en") -> list[dict]:
+        data = await self._request(
+            "/v4/tournaments",
+            {"sportId": self.sport_id, "language": language},
+            settings.cooldown_tournaments_ms,
+        )
+
+        if isinstance(data, list):
+            logger.info("OddsPapi: Found %d LoL tournaments", len(data))
+            return data
+
+        logger.warning("OddsPapi tournaments: unexpected response type %s", type(data))
+        return []
+
+    async def get_participants(self, language: str = "en") -> dict[str, str]:
+        data = await self._request(
+            "/v4/participants",
+            {"sportId": self.sport_id, "language": language},
+            settings.cooldown_participants_ms,
+        )
+
+        if isinstance(data, dict):
+            logger.info("OddsPapi: Found %d LoL participants", len(data))
+            return data
+
+        logger.warning("OddsPapi participants: unexpected response type %s", type(data))
+        return {}
+
+    async def get_fixtures(
+        self,
+        tournament_id: int,
+        from_date: datetime,
+        to_date: datetime,
+        has_odds: bool = True,
+        language: str = "en",
+    ) -> list[dict]:
+        params = {
+            "tournamentId": tournament_id,
+            "from": from_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "to": to_date.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "hasOdds": str(has_odds).lower(),
+            "language": language,
+        }
+
+        try:
+            data = await self._request("/v4/fixtures", params, settings.cooldown_fixtures_ms)
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                logger.info(
+                    "OddsPapi: No fixtures for tournament %d (404)",
+                    tournament_id,
+                )
+                return []
+            raise
+
+        if isinstance(data, list):
+            logger.info(
+                "OddsPapi: Found %d fixtures for tournament %d",
+                len(data),
+                tournament_id,
+            )
+            return data
+
+        logger.warning("OddsPapi fixtures: unexpected response type %s", type(data))
+        return []
+
+    async def get_odds(
+        self,
+        fixture_id: str,
+        bookmakers: str = "pinnacle",
+        odds_format: str = "decimal",
+        verbosity: int = 3,
+    ) -> dict:
+        params = {
+            "fixtureId": fixture_id,
+            "bookmakers": bookmakers,
+            "oddsFormat": odds_format,
+            "verbosity": verbosity,
+        }
+
+        data = await self._request("/v4/odds", params, settings.cooldown_odds_ms)
+
+        if isinstance(data, dict):
+            return data
+
+        return {"raw": data, "fetched_at": datetime.now(tz=timezone.utc).isoformat()}
+
+    async def get_odds_by_tournaments(
+        self,
+        tournament_ids: list[int],
+        bookmaker: str = "pinnacle",
+        odds_format: str = "decimal",
+        verbosity: int = 3,
+    ) -> list[dict]:
+        if not tournament_ids:
+            return []
+
+        params = {
+            "tournamentIds": ",".join(str(t) for t in tournament_ids),
+            "bookmaker": bookmaker,
+            "oddsFormat": odds_format,
+            "verbosity": verbosity,
+        }
+
+        data = await self._request(
+            "/v4/odds-by-tournaments",
+            params,
+            settings.cooldown_odds_by_tournaments_ms,
+        )
+
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict) and "data" in data and isinstance(data["data"], list):
+            return data["data"]
+
+        return []
 
 
 # Module-level convenience instance

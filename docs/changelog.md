@@ -1,5 +1,62 @@
 # Changelog
 
+## Changelog entry format (required)
+- Summary (1–2 lines)
+- Files changed (explicit list)
+- Behavior changes (before/after)
+- Performance impact (what improved, what regressed, how measured)
+- Risk/edge cases
+- Config changes (new keys, defaults)
+- Test plan (how to validate)
+- Why (brief)
+- Impact (behavior/migrations)
+
+## 2026-01-28
+### Summary
+- Migrated live HTTP to async clients, added bounded concurrency, and split live monitor core/TUI for more predictable latency and shutdown behavior.
+
+### Files changed
+- `services/shared/oddspapi_client.py`
+- `services/shared/polymarket_client.py`
+- `services/shared/polymarket_ws.py`
+- `services/cli/monitor_core.py`
+- `services/cli/monitor_types.py`
+- `services/cli/live_tui.py`
+- `services/cli/live.py`
+- `services/cli/discover.py`
+- `services/shared/config.py`
+- `docs/performance.md`
+- `docs/changelog.md`
+
+### Behavior changes
+- **Before**: live HTTP calls were sync via `asyncio.to_thread`, with serial hot polling across fixtures.
+- **After**: live HTTP calls use `httpx.AsyncClient`, hot fixtures poll on independent schedules, and shutdown cancels tasks cleanly.
+
+### Performance impact
+- Reduced threadpool overhead and improved cancellation responsiveness under load.
+- Hot fixture polling cadence no longer degrades linearly with number of hot fixtures.
+
+### Risk / edge cases
+- Async cooldown now serializes requests; verify expected throughput under high fixture count.
+- WS book state snapshots are now locked; ensure no deadlocks in the snapshot loop.
+
+### Config changes
+- `oddspapi_max_concurrent_live` (default `4`)
+- `polymarket_gamma_max_concurrent_live` (default `4`)
+- `polymarket_clob_max_concurrent_live` (default `2`)
+
+### Test plan
+- Run `python -m cli live` during a live match and confirm:
+  - Performance panel updates with stable loop timings.
+  - Hot fixtures continue to update at ~500ms cadence.
+  - Ctrl+C exits without hanging threads.
+
+### Why
+Async I/O and bounded concurrency reduce latency jitter while preserving rate limits.
+
+### Impact
+Live monitoring is more responsive and predictable under multi-match load; UI remains decoupled.
+
 ## 2026-01-26
 ### What changed
 - Implemented event-driven live monitor flow: league polling + hot fixture polling + Polymarket WS state
@@ -30,6 +87,40 @@ This is a latency-sensitive strategy. League-level batch polling surfaces moveme
 - Triggering is based on Δp_ref thresholds and hot TTL escalation
 - New config options for WS reconnect and trigger tuning
 
+### Files changed
+- `services/cli/live.py`
+- `services/shared/oddspapi_client.py`
+- `services/shared/polymarket_ws.py`
+- `services/shared/fixture_state.py`
+- `services/shared/edge.py`
+- `services/shared/config.py`
+- `docs/architecture.md`
+- `docs/project-plan.md`
+- `docs/oddspapi-guide.md`
+
+### Behavior changes
+- **Before**: per-mapping `/v4/odds` and CLOB HTTP batch every loop.
+- **After**: league-wide `/v4/odds-by-tournaments` baseline + per-fixture hot polling; CLOB HTTP only as fallback when WS is missing tokens.
+
+### Performance impact
+- Fewer CLOB HTTP calls due to WS caching.
+- Faster movement detection via batch odds polling.
+
+### Risk / edge cases
+- WS disconnects fall back to HTTP; ensure fallback is visible in the perf panel.
+- Hot polling escalation depends on trigger thresholds; false positives can increase load.
+
+### Config changes
+- `ws_ping_interval_seconds`, `ws_reconnect_base_seconds`, `ws_reconnect_max_seconds`
+- `trigger_primary_threshold`, `trigger_burst_threshold`, `trigger_adaptive_multiplier`
+- `hot_fixture_poll_ms`, `hot_fixture_ttl_seconds`
+
+### Test plan
+- Run `python -m cli live` during a live match and confirm:
+  - WS connects and book state updates.
+  - Hot polling triggers on Δp_ref movement.
+  - Perf panel shows CLOB fallback counts when WS data is missing.
+
 ## 2026-01-26 — Map OddsPapi to Polymarket events
 
 ### What changed
@@ -49,6 +140,30 @@ Market-level timestamps can reflect listing/creation time, not match start. Even
 - Discovery output uses event start times for mapping and overview.
 - Live monitor now resolves match/game markets via the mapped event fixture.
 
+### Files changed
+- `services/cli/discover.py`
+- `services/cli/live.py`
+- `services/shared/models.py`
+- `migrations/0005_add_fixture_hierarchy.py`
+
+### Behavior changes
+- **Before**: mappings linked to match markets directly.
+- **After**: mappings link to event fixtures; match/game markets follow via `parent_fixture_id`.
+
+### Performance impact
+- Lower mapping ambiguity reduces downstream comparison churn.
+
+### Risk / edge cases
+- Events with missing moneyline `gameStartTime` fall back to event start; confirm cross-source consistency.
+
+### Config changes
+- None.
+
+### Test plan
+- Run `python -m cli discover --days 7` and verify:
+  - Event fixtures are created (market_type = event).
+  - Child match/game markets reference the parent via `parent_fixture_id`.
+
 ---
 
 ## 2026-01-26 — Tighten discovery mapping gates
@@ -65,6 +180,27 @@ Mismatches were driven by broad candidate pools (old Polymarket events) and weak
 ### Impact
 - Fewer low-confidence mappings and far fewer cross‑league/time mismatches.
 - Discovery results should align to the `--days` window and UTC dates.
+
+### Files changed
+- `services/cli/discover.py`
+
+### Behavior changes
+- **Before**: broad candidate pools could match across leagues or stale dates.
+- **After**: strict UTC date gate + league match (when detectable) + team suffix normalization.
+
+### Performance impact
+- Reduced candidate comparisons per discovery run.
+
+### Risk / edge cases
+- If a start time lacks timezone, date gating can be too strict.
+
+### Config changes
+- None.
+
+### Test plan
+- Run `python -m cli discover --days 7` and confirm:
+  - Mappings only occur within the date window.
+  - Cross-league matches are rejected.
 
 ---
 
@@ -83,6 +219,27 @@ The UI render cadence should not gate data polling or future execution speed; ti
 - UI refresh can run independently of data loop duration
 - New perf logs in system panel: `perf clob_batch_ms=...` and `perf oddspapi_ms=...`
 - Live UI now shows Total Loop, OddsPapi, CLOB, and Gamma timings each loop
+
+### Files changed
+- `services/cli/live.py`
+
+### Behavior changes
+- **Before**: UI render cadence gated data polling.
+- **After**: data polling runs in a background loop; UI reads shared state.
+
+### Performance impact
+- Reduced UI-induced jitter in data polling.
+
+### Risk / edge cases
+- Shared state access must remain thread-safe under concurrent updates.
+
+### Config changes
+- None.
+
+### Test plan
+- Run `python -m cli live` and verify:
+  - UI updates do not stall data polling.
+  - Performance panel updates each loop.
 
 ---
 

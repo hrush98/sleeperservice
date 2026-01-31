@@ -52,12 +52,15 @@ class PolymarketWSManager:
         self._assets_ids: set[str] = set()
         self._subscribed_assets: set[str] = set()
         self._lock = asyncio.Lock()
+        self._state_lock = asyncio.Lock()
         self._stop = asyncio.Event()
         self._ws: websockets.WebSocketClientProtocol | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
-    def get_state_snapshot(self) -> dict[str, BookState]:
+    async def get_state_snapshot(self) -> dict[str, BookState]:
         """Return a shallow copy of current book state."""
-        return dict(self._book_state)
+        async with self._state_lock:
+            return dict(self._book_state)
 
     async def update_subscriptions(self, assets_ids: list[str]) -> None:
         """Update desired asset subscriptions for the WS connection."""
@@ -72,6 +75,12 @@ class PolymarketWSManager:
 
     async def stop(self) -> None:
         self._stop.set()
+
+    def request_stop(self) -> None:
+        if self._loop:
+            self._loop.call_soon_threadsafe(self._stop.set)
+        else:
+            self._stop.set()
 
     async def run(self) -> None:
         """Main connection loop."""
@@ -90,6 +99,7 @@ class PolymarketWSManager:
         async with websockets.connect(url, ping_interval=None) as ws:
             logger.info("Polymarket WS connected")
             self._ws = ws
+            self._loop = asyncio.get_running_loop()
             await self._send_subscribe(ws)
             ping_task = asyncio.create_task(self._ping_loop(ws))
             try:
@@ -165,7 +175,8 @@ class PolymarketWSManager:
             timestamp=timestamp,
             hash=str(payload.get("hash") or "") or None,
         )
-        self._book_state[asset_id] = book
+        async with self._state_lock:
+            self._book_state[asset_id] = book
 
     async def _handle_price_change(self, payload: dict[str, Any]) -> None:
         changes = payload.get("price_changes") or []
@@ -176,7 +187,8 @@ class PolymarketWSManager:
             asset_id = str(change.get("asset_id") or "")
             if not asset_id:
                 continue
-            book = self._book_state.get(asset_id)
+            async with self._state_lock:
+                book = self._book_state.get(asset_id)
             if not book:
                 book = BookState(
                     asset_id=asset_id,
@@ -197,17 +209,20 @@ class PolymarketWSManager:
             book.best_ask = best_ask
             book.spread = spread
             book.timestamp = timestamp
-            self._book_state[asset_id] = book
+            async with self._state_lock:
+                self._book_state[asset_id] = book
 
     async def _handle_last_trade_price(self, payload: dict[str, Any]) -> None:
         asset_id = str(payload.get("asset_id") or "")
         if not asset_id:
             return
-        book = self._book_state.get(asset_id)
+        async with self._state_lock:
+            book = self._book_state.get(asset_id)
         if not book:
             return
         book.timestamp = self._parse_timestamp(payload.get("timestamp"))
-        self._book_state[asset_id] = book
+        async with self._state_lock:
+            self._book_state[asset_id] = book
 
     def _parse_levels(self, levels: Any, descending: bool) -> list[tuple[float, float]]:
         parsed: list[tuple[float, float]] = []
