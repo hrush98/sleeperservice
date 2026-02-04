@@ -114,7 +114,7 @@ def status():
     from sqlalchemy import func, select
 
     from shared.db import SessionLocal
-    from shared.models import Fixture, League, Mapping, OddsSnapshot, ShadowOrder, Team
+    from shared.models import Fixture, League, Mapping, OddsSnapshot, Position, ShadowOrder, Team, TradeEvent
 
     with SessionLocal() as db:
         leagues_op = db.execute(
@@ -149,6 +149,8 @@ def status():
 
         snapshots = db.execute(select(func.count()).select_from(OddsSnapshot)).scalar_one()
         shadow_orders = db.execute(select(func.count()).select_from(ShadowOrder)).scalar_one()
+        positions = db.execute(select(func.count()).select_from(Position)).scalar_one()
+        trade_events = db.execute(select(func.count()).select_from(TradeEvent)).scalar_one()
 
         last_discovery = db.execute(
             select(func.max(Fixture.updated_at))
@@ -162,6 +164,8 @@ def status():
     typer.echo(f"Mappings:      {mappings_total} total ({mappings_high} high confidence)")
     typer.echo(f"Snapshots:     {snapshots}")
     typer.echo(f"Shadow orders: {shadow_orders}")
+    typer.echo(f"Positions:     {positions}")
+    typer.echo(f"Trade events:  {trade_events}")
     typer.echo(f"Last discovery: {last_discovery or 'Never'}")
 
 

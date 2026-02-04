@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from threading import Lock
 
 from rich.text import Text
@@ -54,6 +54,7 @@ class LiveState:
     last_update: datetime | None
     last_loop_duration: float | None
     perf: "PerfStats" | None
+    ws_connected: bool | None
 
 
 @dataclass
@@ -61,6 +62,9 @@ class PerfStats:
     loop_ms: float | None = None
     oddspapi_ms_total: float = 0.0
     oddspapi_calls: int = 0
+    # Delta since last snapshot (per-loop window)
+    oddspapi_ms_window: float = 0.0
+    oddspapi_calls_window: int = 0
     clob_batch_ms: float | None = None
     gamma_ms_total: float = 0.0
     gamma_calls: int = 0
@@ -96,6 +100,7 @@ class PaperTrade:
     alpha: float
     net_edge: float | None
     p_ref_entry: float | None
+    db_position_id: str | None = None
     status: str = "open"
 
 
@@ -137,13 +142,58 @@ class LogBuffer:
 class LogBufferHandler(logging.Handler):
     """Logging handler that writes to a LogBuffer instead of stdout."""
 
-    def __init__(self, buffer: LogBuffer) -> None:
+    def __init__(self, buffer: LogBuffer, last_events: "LastLogEvents | None" = None) -> None:
         super().__init__()
         self._buffer = buffer
+        self._last_events = last_events
 
     def emit(self, record: logging.LogRecord) -> None:
         message = self.format(record)
         self._buffer.add(message)
+        if self._last_events:
+            self._last_events.update(record, message)
+
+
+class LastLogEvents:
+    """Track the latest warning and error messages."""
+
+    def __init__(self) -> None:
+        self._last_warning: str | None = None
+        self._last_error: str | None = None
+        self._lock = Lock()
+
+    def update(self, record: logging.LogRecord, message: str) -> None:
+        if record.levelno < logging.WARNING:
+            return
+        ts = datetime.fromtimestamp(record.created, tz=timezone.utc).strftime("%H:%M:%S")
+        line = f"[{ts}] {message}"
+        with self._lock:
+            if record.levelno >= logging.ERROR:
+                self._last_error = line
+            else:
+                self._last_warning = line
+
+    def get_last_error(self) -> str | None:
+        with self._lock:
+            return self._last_error
+
+    def get_last_warning(self) -> str | None:
+        with self._lock:
+            return self._last_warning
+
+    def render(self) -> Text:
+        text = Text()
+        err = self.get_last_error()
+        warn = self.get_last_warning()
+        if err:
+            text.append(f"Error: {err}\n", style="bold red")
+        else:
+            text.append("Error: -\n", style="dim")
+        if warn:
+            text.append(f"Warn:  {warn}", style="yellow")
+        else:
+            text.append("Warn:  -", style="dim")
+        return text
 
 
 def format_market_label(market_type: str | None, game_number: int | None) -> str:

@@ -9,7 +9,7 @@ Pinnacle reprices faster than Polymarket. When Pinnacle moves, there's a brief w
 
 ## Design principles (MVP)
 - **Two separate modes**: Discovery (on-demand CLI) vs Live Monitor (runs during matches)
-- **No broad discovery**: Only ingest LoL matches from top 5 leagues
+- **No broad discovery**: Only ingest LoL matches from top 6 leagues
 - **Minimal storage**: Only what's needed for mapping + live comparison
 - **Clear observability**: Know exactly what's happening at each step
 
@@ -21,7 +21,7 @@ Pinnacle reprices faster than Polymarket. When Pinnacle moves, there's a brief w
 Run manually to collect upcoming matches for the next N days. Not always running.
 
 **OddsPapi flow:**
-1. `GET /v4/tournaments?sportId=18` → get tournament IDs for LCK, LPL, LEC, LCS/LTA, LCP
+1. `GET /v4/tournaments?sportId=18` → get tournament IDs for LCK, LPL, LEC, LCS/LTA, LCP, CBLOL
 2. `GET /v4/participants?sportId=18` → cache team ID → name mappings
 3. `GET /v4/fixtures?tournamentId=X&from=...&to=...&hasOdds=true` → get upcoming fixtures
 4. Store: leagues, teams, fixtures
@@ -59,22 +59,23 @@ Runs when mapped matches go live. Compares odds in real-time.
 2. Extract **moneyline** and **game winner** (Game 1/2/3) prices
 3. Poll Polymarket CLOB orderbook for the corresponding market(s)
 4. Compute gap per market: `pinnacle_implied_prob - polymarket_mid`
-5. If gap exceeds threshold → record shadow order
+5. If gap exceeds threshold → record trade event and position (paper)
 6. Log everything for later analysis
 
 **Output:**
 - Console logs showing live comparison
-- Shadow orders stored in DB
+- Trade events + positions stored in DB
 - Simple `/ops/live` endpoint showing current state
 
 ---
 
-## Target leagues (top 5 LoL)
+## Target leagues (top 6 LoL)
 - **LCK** (South Korea) — strongest region
 - **LPL** (China) — strongest region
 - **LEC** (Europe)
 - **LCS/LTA** (North America)
 - **LCP** (Asia-Pacific)
+- **CBLOL** (Brazil)
 
 OddsPapi sportId for LoL: **18**
 
@@ -140,15 +141,53 @@ OddsPapi sportId for LoL: **18**
 - `best_ask` (double precision nullable)
 - `raw_json` (jsonb)
 
-### shadow_orders (append-only)
+### positions (append-only + update on exit)
 - `id` (uuid pk)
 - `mapping_id` (fk → mappings.id)
+- `pm_fixture_id` (fk → fixtures.id)
+- `mode` (text; "paper" | "real")
+- `venue` (text nullable)
+- `market_type` (text)
+- `game_number` (int nullable)
+- `side` (text; "A" | "B")
+- `opened_at` (timestamptz)
+- `entry_price` (double precision)
+- `entry_p_ref` (double precision nullable)
+- `entry_alpha` (double precision nullable)
+- `entry_edge` (double precision nullable)
+- `quantity` (double precision)
+- `trigger_type` (text nullable)
+- `closed_at` (timestamptz nullable)
+- `exit_price` (double precision nullable)
+- `exit_p_ref` (double precision nullable)
+- `exit_reason` (text nullable)
+- `pnl_absolute` (double precision nullable)
+- `pnl_percent` (double precision nullable)
+- `hold_seconds` (double precision nullable)
+- `edge_capture` (double precision nullable)
+- `raw_json` (jsonb)
+
+### trade_events (append-only)
+- `id` (uuid pk)
 - `ts` (timestamptz)
-- `side` (text; "buy_a" | "buy_b")
-- `pinnacle_prob` (double precision)
-- `polymarket_price` (double precision)
-- `gap` (double precision)
-- `reason` (text)
+- `run_id` (uuid)
+- `event_type` (text)
+- `mode` (text)
+- `mapping_id` (fk → mappings.id)
+- `pm_fixture_id` (fk → fixtures.id)
+- `position_id` (fk → positions.id, nullable)
+- `market_type` (text nullable)
+- `game_number` (int nullable)
+- `side` (text nullable)
+- `reason` (text nullable)
+- `details` (text nullable)
+- `edge_threshold`, `spread_factor`, `alpha_min`, `alpha_spread_factor`, `exit_epsilon` (double precision nullable)
+- `p_ref_a`, `p_ref_b`, `bid_a`, `ask_a`, `mid_a`, `bid_b`, `ask_b`, `mid_b` (double precision nullable)
+- `best_edge` (double precision nullable)
+- `best_side` (text nullable)
+- `quantity`, `limit_price`, `avg_fill_price`, `size_available`, `net_edge` (double precision nullable)
+- `exit_price`, `pnl_percent` (double precision nullable)
+- `external_order_id`, `external_fill_id`, `external_status` (text nullable)
 - `raw_json` (jsonb)
 
 ---
@@ -171,7 +210,7 @@ OddsPapi sportId for LoL: **18**
 - Implement Polymarket WS book state (top-of-book + depth in memory)
 - Trigger on Δp_ref thresholds + lock/unlock
 - Compare and compute edge using PM bid/ask
-- Record shadow orders / alerts
+- Record trade events + paper positions / alerts
 - CLI: `monitor` (watches live matches)
 
 ### M3 — Observability
@@ -180,7 +219,7 @@ OddsPapi sportId for LoL: **18**
 - Console output that makes sense
 
 ### M4 — Evaluation
-- Review shadow orders vs actual price movements
+- Review trade events + positions vs actual price movements
 - Measure lag distributions
 - Decide if edge is real
 
@@ -240,7 +279,7 @@ curl http://localhost:8000/ops/status
 ---
 
 ## What we're NOT doing (MVP scope control)
-- No broad market discovery (only LoL top 5 leagues)
+- No broad market discovery (only LoL top 6 leagues)
 - No always-running worker polling everything
 - No complex settlement specs or quote snapshots for non-live matches
 - No UI

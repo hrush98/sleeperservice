@@ -1,13 +1,15 @@
 """
 LoL Lead-Lag Arbitrage Bot - Database Models (v2 simplified schema)
 
-6 tables:
+8 tables:
 - leagues: Tournament/league metadata from both sources
 - teams: Team/participant cache from both sources
 - fixtures: Upcoming/live matches from both sources
 - mappings: OddsPapi fixture ↔ Polymarket fixture links
 - odds_snapshots: Live price time series (append-only)
-- shadow_orders: Paper trade decisions (append-only)
+- shadow_orders: Paper trade decisions (append-only, legacy)
+- positions: Trade lifecycle (paper/real)
+- trade_events: Trade decision/execution event tape (append-only)
 """
 
 from __future__ import annotations
@@ -217,4 +219,125 @@ class ShadowOrder(Base):
     __table_args__ = (
         Index("ix_shadow_orders_mapping_ts", "mapping_id", "ts"),
         Index("ix_shadow_orders_ts", "ts"),
+    )
+
+
+class Position(Base):
+    """Trade lifecycle record (entry → exit), paper or real."""
+
+    __tablename__ = "positions"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    mapping_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("mappings.id"), nullable=False
+    )
+    pm_fixture_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("fixtures.id"), nullable=True
+    )
+    mode: Mapped[str] = mapped_column(String, nullable=False, default="paper")
+    venue: Mapped[str | None] = mapped_column(String, nullable=True)
+    market_type: Mapped[str] = mapped_column(String, nullable=False)
+    game_number: Mapped[int | None] = mapped_column(nullable=True)
+    side: Mapped[str] = mapped_column(String, nullable=False)  # "A" | "B"
+
+    # Entry
+    opened_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    entry_price: Mapped[float] = mapped_column(Float, nullable=False)
+    entry_p_ref: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_alpha: Mapped[float | None] = mapped_column(Float, nullable=True)
+    entry_edge: Mapped[float | None] = mapped_column(Float, nullable=True)
+    quantity: Mapped[float] = mapped_column(Float, nullable=False)
+    trigger_type: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Exit
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exit_p_ref: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exit_reason: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    # Calculated
+    pnl_absolute: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pnl_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    hold_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    edge_capture: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    raw_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+    mapping: Mapped[Mapping] = relationship("Mapping")
+    pm_fixture: Mapped[Fixture | None] = relationship("Fixture", foreign_keys=[pm_fixture_id])
+
+    __table_args__ = (
+        Index("ix_positions_mapping_opened", "mapping_id", "opened_at"),
+        Index("ix_positions_opened", "opened_at"),
+        Index("ix_positions_closed", "closed_at"),
+    )
+
+
+class TradeEvent(Base):
+    """Append-only trade event tape for decisions and execution lifecycle."""
+
+    __tablename__ = "trade_events"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    run_id: Mapped[str] = mapped_column(UUID(as_uuid=True), nullable=False)
+    event_type: Mapped[str] = mapped_column(String, nullable=False)
+    mode: Mapped[str] = mapped_column(String, nullable=False)
+
+    mapping_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("mappings.id"), nullable=True
+    )
+    pm_fixture_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("fixtures.id"), nullable=True
+    )
+    position_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("positions.id"), nullable=True
+    )
+
+    market_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    game_number: Mapped[int | None] = mapped_column(nullable=True)
+    side: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    details: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    edge_threshold: Mapped[float | None] = mapped_column(Float, nullable=True)
+    spread_factor: Mapped[float | None] = mapped_column(Float, nullable=True)
+    alpha_min: Mapped[float | None] = mapped_column(Float, nullable=True)
+    alpha_spread_factor: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exit_epsilon: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    p_ref_a: Mapped[float | None] = mapped_column(Float, nullable=True)
+    p_ref_b: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bid_a: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ask_a: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mid_a: Mapped[float | None] = mapped_column(Float, nullable=True)
+    bid_b: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ask_b: Mapped[float | None] = mapped_column(Float, nullable=True)
+    mid_b: Mapped[float | None] = mapped_column(Float, nullable=True)
+    best_edge: Mapped[float | None] = mapped_column(Float, nullable=True)
+    best_side: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    quantity: Mapped[float | None] = mapped_column(Float, nullable=True)
+    limit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_fill_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    size_available: Mapped[float | None] = mapped_column(Float, nullable=True)
+    net_edge: Mapped[float | None] = mapped_column(Float, nullable=True)
+    exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pnl_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    external_order_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    external_fill_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    external_status: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    raw_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+    mapping: Mapped[Mapping | None] = relationship("Mapping")
+    pm_fixture: Mapped[Fixture | None] = relationship("Fixture", foreign_keys=[pm_fixture_id])
+    position: Mapped[Position | None] = relationship("Position")
+
+    __table_args__ = (
+        Index("ix_trade_events_mapping_ts", "mapping_id", "ts"),
+        Index("ix_trade_events_position_ts", "position_id", "ts"),
+        Index("ix_trade_events_run_ts", "run_id", "ts"),
     )

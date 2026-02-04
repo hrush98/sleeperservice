@@ -13,8 +13,10 @@ from datetime import datetime, timezone
 from typing import Any
 
 import websockets
+from websockets.exceptions import ConnectionClosed, ConnectionClosedOK, ConnectionClosedError
 
 from shared.config import settings
+from shared.agent_debug import agent_log
 
 logger = logging.getLogger(__name__)
 
@@ -51,9 +53,12 @@ class PolymarketWSManager:
         self._book_state: dict[str, BookState] = {}
         self._assets_ids: set[str] = set()
         self._subscribed_assets: set[str] = set()
-        self._lock = asyncio.Lock()
-        self._state_lock = asyncio.Lock()
-        self._stop = asyncio.Event()
+        # NOTE: asyncio primitives are created lazily in run() to ensure they're
+        # bound to the correct event loop (manager may be created in main thread
+        # but run in a different thread with its own event loop)
+        self._lock: asyncio.Lock | None = None
+        self._state_lock: asyncio.Lock | None = None
+        self._stop: asyncio.Event | None = None
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
 
@@ -61,6 +66,9 @@ class PolymarketWSManager:
         """Return a shallow copy of current book state."""
         async with self._state_lock:
             return dict(self._book_state)
+
+    def is_connected(self) -> bool:
+        return self._ws is not None
 
     async def update_subscriptions(self, assets_ids: list[str]) -> None:
         """Update desired asset subscriptions for the WS connection."""
@@ -74,9 +82,12 @@ class PolymarketWSManager:
             await self._send_subscribe(ws)
 
     async def stop(self) -> None:
-        self._stop.set()
+        if self._stop:
+            self._stop.set()
 
     def request_stop(self) -> None:
+        if self._stop is None:
+            return
         if self._loop:
             self._loop.call_soon_threadsafe(self._stop.set)
         else:
@@ -84,6 +95,15 @@ class PolymarketWSManager:
 
     async def run(self) -> None:
         """Main connection loop."""
+        # Create asyncio primitives in the running event loop
+        # (they must be created in the same loop where they're used)
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        if self._state_lock is None:
+            self._state_lock = asyncio.Lock()
+        if self._stop is None:
+            self._stop = asyncio.Event()
+        
         backoff = self._reconnect_base
         while not self._stop.is_set():
             try:
@@ -96,17 +116,46 @@ class PolymarketWSManager:
 
     async def _connect_and_listen(self) -> None:
         url = f"{self._ws_url}/ws/market"
-        async with websockets.connect(url, ping_interval=None) as ws:
+        logger.debug("WS connecting to %s", url)
+        # Disable websockets library's automatic ping/pong - we handle it at application level
+        # ping_interval=None disables sending pings
+        # ping_timeout=None disables waiting for pongs
+        # close_timeout=10 gives time for graceful close
+        async with websockets.connect(
+            url,
+            ping_interval=None,
+            ping_timeout=None,
+            close_timeout=10,
+            compression=None,  # Disable compression - can cause issues with some servers
+            additional_headers={
+                "Origin": "https://polymarket.com",
+                "User-Agent": "Mozilla/5.0 (compatible; PolymarketBot/1.0)",
+            },
+        ) as ws:
             logger.info("Polymarket WS connected")
             self._ws = ws
             self._loop = asyncio.get_running_loop()
-            await self._send_subscribe(ws)
+            
+            # CRITICAL: Must send subscribe BEFORE any pings - server closes otherwise
+            try:
+                await self._send_subscribe(ws)
+            except Exception as e:
+                logger.error("WS subscribe failed: %s", e)
+                raise
             ping_task = asyncio.create_task(self._ping_loop(ws))
             try:
-                async for message in ws:
-                    if self._stop.is_set():
-                        break
-                    await self._handle_message(ws, message)
+                while not self._stop.is_set():
+                    try:
+                        message = await asyncio.wait_for(ws.recv(), timeout=30.0)
+                        await self._handle_message(ws, message)
+                    except asyncio.TimeoutError:
+                        continue
+            except ConnectionClosedOK:
+                logger.info("WS connection closed normally")
+            except ConnectionClosedError as e:
+                logger.warning("WS connection closed with error: code=%s reason=%s", e.code, e.reason)
+            except ConnectionClosed as e:
+                logger.warning("WS connection closed: code=%s reason=%s", e.code, e.reason)
             finally:
                 ping_task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -117,33 +166,70 @@ class PolymarketWSManager:
     async def _send_subscribe(self, ws: websockets.WebSocketClientProtocol) -> None:
         async with self._lock:
             assets_ids = list(self._assets_ids)
-            if set(assets_ids) == self._subscribed_assets:
-                return
+            # Always send subscription message - server requires it before accepting pings
+            if assets_ids and set(assets_ids) == self._subscribed_assets:
+                return  # Already subscribed to these exact assets
             self._subscribed_assets = set(assets_ids)
         payload = {"assets_ids": assets_ids, "type": "market"}
         await ws.send(json.dumps(payload))
-        logger.info("WS subscribe assets=%d", len(assets_ids))
+        logger.info("WS subscribed to %d assets", len(assets_ids))
 
     async def _ping_loop(self, ws: websockets.WebSocketClientProtocol) -> None:
+        # Wait before first ping to give recv loop time to start
+        await asyncio.sleep(self._ping_interval)
         while not self._stop.is_set():
             try:
-                await ws.send("PING")
+                pong_waiter = ws.ping()
+                # If the server doesn't answer, force reconnect.
+                await asyncio.wait_for(pong_waiter, timeout=max(5.0, float(self._ping_interval)))
             except Exception:
                 return
             await asyncio.sleep(self._ping_interval)
 
     async def _handle_message(self, ws: websockets.WebSocketClientProtocol, message: str) -> None:
-        if message in {"PING", "ping"}:
+        # Handle ping/pong keepalive (case insensitive)
+        msg_upper = message.upper() if isinstance(message, str) else ""
+        if msg_upper == "PING":
             await ws.send("PONG")
+            return
+        if msg_upper == "PONG":
+            # Server acknowledged our ping - nothing to do
             return
 
         try:
             payload = json.loads(message)
         except json.JSONDecodeError:
-            logger.debug("WS non-JSON message: %s", message)
+            logger.debug("WS non-JSON message: %s", message[:100] if message else message)
             return
 
+        if isinstance(payload, list):
+            # Some servers batch events as a JSON array.
+            for item in payload:
+                if isinstance(item, dict):
+                    await self._handle_payload_dict(item)
+            return
+
+        if not isinstance(payload, dict):
+            return
+
+        await self._handle_payload_dict(payload)
+
+    async def _handle_payload_dict(self, payload: dict[str, Any]) -> None:
+        """Handle a single decoded WS event payload."""
+
         event_type = str(payload.get("event_type") or "").lower()
+        # region agent log (WS event routing)
+        agent_log(
+            location="services/shared/polymarket_ws.py:_handle_payload_dict",
+            message="ws payload dict received",
+            hypothesis_id="H1",
+            data={
+                "event_type": event_type,
+                "has_type": "type" in payload,
+                "keys": list(payload.keys())[:8],
+            },
+        )
+        # endregion
         if event_type == "book":
             await self._handle_book(payload)
         elif event_type == "price_change":
@@ -177,6 +263,20 @@ class PolymarketWSManager:
         )
         async with self._state_lock:
             self._book_state[asset_id] = book
+        # region agent log (book updates)
+        agent_log(
+            location="services/shared/polymarket_ws.py:_handle_book",
+            message="book updated",
+            hypothesis_id="H1",
+            data={
+                "asset_id": asset_id,
+                "best_bid": best_bid,
+                "best_ask": best_ask,
+                "bids_n": len(bids),
+                "asks_n": len(asks),
+            },
+        )
+        # endregion
 
     async def _handle_price_change(self, payload: dict[str, Any]) -> None:
         changes = payload.get("price_changes") or []
@@ -211,6 +311,14 @@ class PolymarketWSManager:
             book.timestamp = timestamp
             async with self._state_lock:
                 self._book_state[asset_id] = book
+            # region agent log (price change updates)
+            agent_log(
+                location="services/shared/polymarket_ws.py:_handle_price_change",
+                message="price_change applied",
+                hypothesis_id="H1",
+                data={"asset_id": asset_id, "best_bid": best_bid, "best_ask": best_ask},
+            )
+            # endregion
 
     async def _handle_last_trade_price(self, payload: dict[str, Any]) -> None:
         asset_id = str(payload.get("asset_id") or "")

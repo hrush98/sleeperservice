@@ -11,6 +11,285 @@
 - Why (brief)
 - Impact (behavior/migrations)
 
+## 2026-02-03
+### Summary
+- Added CBLOL to target league matching for discovery and Polymarket market filtering.
+- Updated docs to reflect top-6 league scope.
+
+### Files changed
+- `services/cli/discover.py`
+- `services/shared/config.py`
+- `services/shared/polymarket_client.py`
+- `README.md`
+- `docs/project-plan.md`
+- `docs/architecture.md`
+- `docs/changelog.md`
+
+### Behavior changes
+- **Before**: discovery/mapping filtered to LCK/LPL/LEC/LCS/LTA/LCP only.
+- **After**: CBLOL tournaments and markets are now included in discovery/mapping.
+
+### Performance impact
+- Slightly more fixtures and markets processed during discovery.
+
+### Risk / edge cases
+- CBLOL market naming may vary; matching relies on league text including "CBLOL".
+
+### Config changes
+- `target_leagues` default now includes `CBLOL`.
+
+### Test plan
+- Run `python -m cli discover --days 7` and confirm CBLOL tournaments/fixtures appear.
+
+### Why
+CBLOL has sufficient volume to justify mapping and monitoring.
+
+### Impact
+- Broader discovery scope for LoL without schema or migration changes.
+
+## 2026-02-03
+### Summary
+- Unified paper positions into `positions` with paper/real mode and added append-only `trade_events` tape for decision + execution lifecycle tracking.
+- Live monitor now writes positions + trade events atomically for entry/exit and emits structured signal events.
+
+### Files changed
+- `services/shared/models.py`
+- `services/shared/__init__.py`
+- `services/cli/monitor_core.py`
+- `services/api/routers/ops.py`
+- `services/cli/main.py`
+- `migrations/versions/0007_trade_events_positions.py`
+- `docs/architecture.md`
+- `docs/project-plan.md`
+- `docs/changelog.md`
+
+### Behavior changes
+- **Before**: paper trades were stored in `paper_positions`; no structured event tape for triggers/skips/entries/exits.
+- **After**: trades persist in `positions` (`mode=paper|real`), and `trade_events` records trigger/entry/exit and execution lifecycle events.
+- **Before**: entry/exit DB writes were separate from any event logging.
+- **After**: entry/exit position writes and matching `trade_events` are written in the same DB transaction.
+
+### Performance impact
+- Additional DB writes per trigger/entry/exit to record `trade_events`; entry/exit remain low-frequency relative to polling.
+
+### Risk / edge cases
+- Increased write volume if triggers are frequent; monitor DB capacity/latency.
+- Backfill of `pm_fixture_id` depends on `raw_json.market_id`; rows missing this key will remain null.
+
+### Config changes
+- None.
+
+### Test plan
+- Run `alembic upgrade head`.
+- Run `python -m cli live` during a live match and confirm:
+  - `positions` rows are created/updated with `mode=paper`.
+  - `trade_events` rows are created for `TRIGGER`, `ENTRY`, `EXIT`.
+- Run tests: `conda run -n poly env PYTHONPATH=. pytest -q`.
+
+### Why
+Add a first-class decision/execution tape and prepare the schema for real trading without duplicating position tables.
+
+### Impact
+- New migration required for `positions` + `trade_events`.
+- Live monitor now persists a structured event trail for evaluation and execution workflows.
+
+---
+
+## 2026-02-02
+### Summary
+- Corrected Polymarket WS disconnect root cause; fixed keepalive + batch payload handling for stable live books.
+- Fixed live monitor Polymarket token/outcome mapping by using fresh Gamma payload (reduces CLOB 404s and prevents A/B swaps after pauses/restarts).
+
+### Files changed
+- `services/shared/polymarket_ws.py`
+- `services/cli/monitor_core.py`
+- `docs/changelog.md`
+
+### Behavior changes
+- **Before**: WS would connect + subscribe, then drop with `CloseCode.ABNORMAL_CLOSURE` (1006) shortly after the first keepalive; occasional crashes from JSON list payloads (`'list' object has no attribute 'get'`).
+- **After**: WS stays connected across many keepalive intervals; JSON list (batched) payloads are handled safely.
+- **Before**: Live monitor relied on DB-stored `pm_fixture.raw_json` for `clobTokenIds/outcomes`; after match pause/restart this could go stale causing CLOB `/book` 404s and mis-assigning A/B when outcome labels differed from team names.
+- **After**: Live monitor prefers freshly fetched Gamma market payload (`pm_latest`) for `tokens/clobTokenIds/outcomes`, and uses more forgiving outcome↔team matching, keeping Pinnacle p_ref and PM prices aligned.
+
+### Performance impact
+- Improved stability (removes reconnect churn); negligible overhead change (WS ping frames + pong wait).
+- Slight increase in per-snapshot Gamma reads (but cached via TTL); reduced wasted CLOB HTTP retries/error noise from stale token IDs.
+
+### Risk / edge cases
+- If the server stops responding to ping frames, the client will reconnect (expected).
+- If Gamma temporarily fails, the monitor falls back to DB-stored market payloads (may reintroduce stale-token behavior until Gamma recovers).
+
+### Config changes
+- None.
+
+### Test plan
+- Run `PYTHONPATH=./services python -m cli live` and confirm:
+  - WS remains connected past the first 5s keepalive interval (no repeated “disconnected/connected” loop).
+  - No `'list' object has no attribute 'get'` errors.
+- Run tests: `conda run -n poly env PYTHONPATH=. pytest -q`.
+
+### Why
+The prior “threading mismatch” hypothesis didn’t match runtime evidence; disconnect timing correlated with the first keepalive message, and the server also sends batched (list) JSON payloads.
+
+### Impact
+- Live monitor WS connectivity is stable again.
+- Live monitor is resilient to Polymarket market/token reshuffles during pauses/restarts.
+- No migration required.
+
+---
+
+## 2026-02-02
+### Summary
+- Fixed Polymarket WebSocket "no close frame" disconnection bug caused by asyncio event loop threading mismatch.
+
+### Files changed
+- `services/shared/polymarket_ws.py`
+- `services/shared/config.py`
+
+### Bug description
+WebSocket connections to Polymarket CLOB were immediately closing with `CloseCode.ABNORMAL_CLOSURE` (1006) and error message "no close frame received or sent". The connection would establish successfully, send the subscription, start the ping loop, but then drop within seconds. Standalone tests passed, but the live monitor always failed.
+
+### Investigation timeline
+1. **Initial hypothesis (wrong)**: Server requires subscription before PING. Fixed ordering, but issue persisted.
+2. **Added detailed logging**: Confirmed subscribe completed successfully, ping loop started, but connection still closed.
+3. **Key observation**: Standalone tests always worked. Live monitor always failed. Both used identical WebSocket code.
+4. **Critical difference identified**: Live monitor runs the WebSocket in a **background thread** with its own event loop, while standalone tests run in the main thread.
+
+### Root cause: asyncio primitives are event-loop bound
+
+The `PolymarketWSManager` class created `asyncio.Lock()` and `asyncio.Event()` in its `__init__` method:
+
+```python
+def __init__(self, ...):
+    ...
+    self._lock = asyncio.Lock()      # Created in main thread's event loop
+    self._state_lock = asyncio.Lock()
+    self._stop = asyncio.Event()
+```
+
+The live monitor architecture:
+1. **Main thread**: Creates `PolymarketWSManager()` → asyncio primitives bound to main thread's event loop (or no loop)
+2. **Background thread**: `EventDrivenMonitor` creates a **new event loop** via `asyncio.new_event_loop()`
+3. **Background thread**: Calls `ws_manager.run()` which tries to use `self._lock`, `self._stop`
+
+**The problem**: `asyncio.Lock` and `asyncio.Event` are tied to the event loop that was active when they were created. Using them from a different event loop causes **undefined behavior**:
+- Operations may silently fail
+- Coroutines may not properly await
+- The WebSocket recv() loop breaks, causing the connection to appear "closed"
+
+This is a subtle bug because:
+- No explicit error is raised
+- The WebSocket handshake completes successfully
+- The subscription sends successfully
+- But internal state coordination fails silently
+
+### Fix: Lazy initialization of asyncio primitives
+
+Create asyncio primitives inside `run()` where the correct event loop is guaranteed to be active:
+
+```python
+def __init__(self, ...):
+    ...
+    # Don't create here - wrong event loop!
+    self._lock: asyncio.Lock | None = None
+    self._state_lock: asyncio.Lock | None = None
+    self._stop: asyncio.Event | None = None
+
+async def run(self) -> None:
+    # Create in the running event loop (correct!)
+    if self._lock is None:
+        self._lock = asyncio.Lock()
+    if self._state_lock is None:
+        self._state_lock = asyncio.Lock()
+    if self._stop is None:
+        self._stop = asyncio.Event()
+    ...
+```
+
+### Additional fixes applied
+1. **Reordered connection flow**: Send subscription before starting ping loop (server requirement).
+2. **Always send subscription**: Empty subscription `{"assets_ids": [], "type": "market"}` satisfies server protocol.
+3. **Connection hardening**: Disabled compression, added Origin/User-Agent headers, explicit timeouts.
+4. **Reduced ping interval**: 10s → 5s for more aggressive keepalive.
+5. **Delayed first ping**: Wait one ping interval before first PING to let recv loop initialize.
+
+### Behavior changes
+- **Before**: WebSocket connected then disconnected within seconds with "no close frame" error.
+- **After**: WebSocket connects and maintains stable connection indefinitely.
+
+### Performance impact
+- WebSocket connections now remain stable, enabling real-time orderbook updates.
+- No performance regression.
+
+### Lessons learned
+1. **asyncio primitives are event-loop bound**: `Lock`, `Event`, `Queue`, `Condition` must be created in the same event loop where they'll be used.
+2. **Thread + asyncio requires care**: When mixing threading with asyncio, primitives must be created inside the async context, not in `__init__`.
+3. **Standalone tests can miss threading bugs**: The bug only manifested when the object was created in one thread and used in another.
+4. **Silent failures are the hardest**: No exception was raised; the WebSocket just appeared to close randomly.
+
+### Risk / edge cases
+- Empty subscription returns no market data until `update_subscriptions()` is called with asset IDs.
+- Server may still close connections for rate limiting; reconnect logic handles this.
+
+### Config changes
+- `ws_ping_interval_seconds`: Default changed from `10` to `5`.
+
+### Test plan
+- Run `python -m cli live` and confirm:
+  - "Polymarket WS connected" appears once (not repeatedly).
+  - "WS subscribed to N assets" appears.
+  - Connection remains stable for extended periods (minutes/hours).
+  - No "connection closed" or "no close frame" errors during normal operation.
+
+### Why
+WebSocket connectivity is critical for real-time orderbook data. The threading bug made the feature completely non-functional in the live monitor despite passing all standalone tests.
+
+### Impact
+- Live monitor WebSocket connections are now stable.
+- No migration required.
+- Pattern applies to any asyncio code that may run in a different thread than where objects are created.
+
+---
+
+## 2026-02-02
+### Summary
+- Added paper position lifecycle tracking with entry/exit persistence and cleaner live trade tape output with P&L.
+
+### Files changed
+- `services/shared/models.py`
+- `services/cli/monitor_types.py`
+- `services/cli/monitor_core.py`
+- `migrations/versions/0006_paper_positions.py`
+- `docs/architecture.md`
+- `docs/changelog.md`
+
+### Behavior changes
+- **Before**: live paper trades were in-memory only and trade tape did not show P&L.
+- **After**: entry/exit trades persist to `paper_positions`, and trade tape shows BUY/SELL with prices and P&L.
+
+### Performance impact
+- Slight additional DB writes on entry/exit only; no change to polling cadence.
+
+### Risk / edge cases
+- Exit records may have `null` P&L if bid is unavailable at exit.
+- DB writes inside live loop assume DB connectivity; failure should be monitored.
+
+### Config changes
+- None.
+
+### Test plan
+- Run `alembic upgrade head`.
+- Run `python -m cli live` during a live match and confirm:
+  - Trade tape shows `TRIGGER`, `ENTRY`, `EXIT` with BUY/SELL and P&L%.
+  - `paper_positions` rows are created on entry and updated on exit.
+
+### Why
+Persisting paper trades enables realistic evaluation and improves operator feedback during live matches.
+
+### Impact
+- New migration required for `paper_positions` table.
+- Live monitor now writes paper trade lifecycle records to the database.
+
 ## 2026-01-28
 ### Summary
 - Migrated live HTTP to async clients, added bounded concurrency, and split live monitor core/TUI for more predictable latency and shutdown behavior.

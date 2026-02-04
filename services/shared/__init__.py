@@ -2,7 +2,16 @@
 
 from shared.config import settings
 from shared.db import Base, SessionLocal, engine, get_db_session
-from shared.models import Fixture, League, Mapping, OddsSnapshot, ShadowOrder, Team
+from shared.models import (
+    Fixture,
+    League,
+    Mapping,
+    OddsSnapshot,
+    Position,
+    ShadowOrder,
+    Team,
+    TradeEvent,
+)
 from shared.oddspapi_client import OddsPapiClient, get_client as get_oddspapi_client
 from shared.polymarket_client import PolymarketClient, get_client as get_polymarket_client
 
@@ -20,7 +29,9 @@ __all__ = [
     "Fixture",
     "Mapping",
     "OddsSnapshot",
+    "Position",
     "ShadowOrder",
+    "TradeEvent",
     # Clients
     "OddsPapiClient",
     "PolymarketClient",

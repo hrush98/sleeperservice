@@ -16,7 +16,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from api.dependencies import get_db
-from shared.models import Fixture, League, Mapping, OddsSnapshot, ShadowOrder, Team
+from shared.models import Fixture, League, Mapping, OddsSnapshot, Position, ShadowOrder, Team, TradeEvent
 
 router = APIRouter(prefix="/ops", tags=["Operations"])
 
@@ -32,6 +32,8 @@ class StatusResponse(BaseModel):
     live_matches: int
     odds_snapshots: int
     shadow_orders: int
+    positions: int
+    trade_events: int
 
 
 class LiveMatchInfo(BaseModel):
@@ -96,6 +98,8 @@ def get_status(db: Session = Depends(get_db)):
 
     odds_snapshots = db.execute(select(func.count()).select_from(OddsSnapshot)).scalar_one()
     shadow_orders = db.execute(select(func.count()).select_from(ShadowOrder)).scalar_one()
+    positions = db.execute(select(func.count()).select_from(Position)).scalar_one()
+    trade_events = db.execute(select(func.count()).select_from(TradeEvent)).scalar_one()
 
     return StatusResponse(
         leagues=leagues,
@@ -106,6 +110,8 @@ def get_status(db: Session = Depends(get_db)):
         live_matches=live_matches,
         odds_snapshots=odds_snapshots,
         shadow_orders=shadow_orders,
+        positions=positions,
+        trade_events=trade_events,
     )
 
 

@@ -393,7 +393,7 @@ class PolymarketClient:
 
         Looks for markets with LoL-related tags or titles.
         """
-        lol_keywords = ["lol", "league of legends", "lck", "lpl", "lec", "lcs", "lta", "lcp"]
+        lol_keywords = ["lol", "league of legends", *settings.target_league_patterns]
 
         filtered = []
         for market in markets:

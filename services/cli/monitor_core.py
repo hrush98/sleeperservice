@@ -10,6 +10,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from threading import Lock, Thread
 from types import SimpleNamespace
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import aliased
@@ -25,10 +26,11 @@ from shared.edge import (
     devig_two_way_decimal,
 )
 from shared.fixture_state import FixtureStateManager, TriggerEvent
-from shared.models import Fixture, Mapping
+from shared.models import Fixture, Mapping, Position, TradeEvent
 from shared.oddspapi_client import AsyncOddsPapiClient, OddsPapiClient
 from shared.polymarket_client import AsyncPolymarketClient
 from shared.polymarket_ws import BookState, PolymarketWSManager
+from shared.agent_debug import agent_log
 
 from .monitor_types import (
     LiveState,
@@ -84,6 +86,7 @@ class EventDrivenMonitor:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stop: asyncio.Event | None = None
         self._tasks: list[asyncio.Task] = []
+        self._run_id = uuid4()
 
         self._candidates_lock = Lock()
         self._candidates: list[tuple[Mapping, Fixture, Fixture, str]] = []
@@ -95,6 +98,8 @@ class EventDrivenMonitor:
         self._alert_cooldown = 30
         self._perf_lock = Lock()
         self._perf = PerfStats()
+        self._last_perf_odds_ms_total = 0.0
+        self._last_perf_odds_calls = 0
         self._league_poll_ready = False
         self._triggers: dict[str, TriggerRecord] = {}
         self._open_trades: dict[str, PaperTrade] = {}
@@ -196,6 +201,20 @@ class EventDrivenMonitor:
                 if not fixture_id:
                     continue
                 self._odds_cache[fixture_id] = odds_payload
+                # region agent log (odds cache updates)
+                updated_at_val = odds_payload.get("updatedAt")
+                agent_log(
+                    location="services/cli/monitor_core.py:_league_poll_loop",
+                    message="odds cache updated",
+                    hypothesis_id="H3",
+                    data={
+                        "fixture_id": fixture_id,
+                        "statusId": odds_payload.get("statusId"),
+                        "updatedAt_type": type(updated_at_val).__name__,
+                        "updatedAt": str(updated_at_val)[:32] if updated_at_val is not None else None,
+                    },
+                )
+                # endregion
                 p_ref_a, p_ref_b, _, _ = _extract_p_refs_from_odds(
                     odds_payload, market_type="match_winner", game_number=None
                 )
@@ -236,6 +255,20 @@ class EventDrivenMonitor:
                 self._perf.oddspapi_calls += 1
             if isinstance(odds_payload, dict):
                 self._odds_cache[fixture_id] = odds_payload
+                # region agent log (odds cache updates - hot)
+                updated_at_val = odds_payload.get("updatedAt")
+                agent_log(
+                    location="services/cli/monitor_core.py:_hot_fixture_worker",
+                    message="odds cache updated (hot)",
+                    hypothesis_id="H3",
+                    data={
+                        "fixture_id": fixture_id,
+                        "statusId": odds_payload.get("statusId"),
+                        "updatedAt_type": type(updated_at_val).__name__,
+                        "updatedAt": str(updated_at_val)[:32] if updated_at_val is not None else None,
+                    },
+                )
+                # endregion
                 p_ref_a, p_ref_b, _, _ = _extract_p_refs_from_odds(
                     odds_payload, market_type="match_winner", game_number=None
                 )
@@ -259,13 +292,49 @@ class EventDrivenMonitor:
                 continue
 
             ws_state = await self._ws_manager.get_state_snapshot()
-            http_books: dict[str, BookState] = {}
+
+            # Fetch latest market objects (Gamma) first, so we can:
+            # - use fresh clobTokenIds/tokens (markets can change during pauses/restarts)
+            # - compute accurate required token set for WS coverage + HTTP fallback
+            pm_latest_by_market_id: dict[str, dict] = {}
             required_tokens: set[str] = set()
-            for _, op_fixture, pm_fixture, _ in candidates:
-                if not op_fixture.raw_json:
-                    continue
-                required_tokens.update(_parse_token_ids(pm_fixture.raw_json or {}))
+            for _, _, pm_fixture, _ in candidates:
+                market_id = str(pm_fixture.source_id)
+                gamma_start = time.perf_counter()
+                pm_latest = await _get_pm_latest_cached_async(
+                    polymarket=self._polymarket,
+                    cache=self._pm_status_cache,
+                    market_id=market_id,
+                    now=now,
+                    ttl=self._pm_status_ttl,
+                    semaphore=self._gamma_sem,
+                )
+                gamma_ms = (time.perf_counter() - gamma_start) * 1000
+                with self._perf_lock:
+                    self._perf.gamma_ms_total += gamma_ms
+                    self._perf.gamma_calls += 1
+                if isinstance(pm_latest, dict):
+                    pm_latest_by_market_id[market_id] = pm_latest
+                    required_tokens.update(_extract_token_ids(pm_latest))
+                else:
+                    required_tokens.update(_extract_token_ids(getattr(pm_fixture, "raw_json", None) or {}))
+
             missing_tokens = [t for t in required_tokens if t and t not in ws_state]
+            # region agent log (WS snapshot + subscription coverage)
+            agent_log(
+                location="services/cli/monitor_core.py:_snapshot_loop",
+                message="ws snapshot acquired",
+                hypothesis_id="H2",
+                data={
+                    "ws_connected": bool(self._ws_manager.is_connected()),
+                    "ws_assets": len(ws_state),
+                    "required_tokens": len(required_tokens),
+                    "missing_tokens": len(missing_tokens),
+                },
+            )
+            # endregion
+
+            http_books: dict[str, BookState] = {}
             if missing_tokens:
                 books_start = time.perf_counter()
                 async with self._clob_sem:
@@ -276,6 +345,14 @@ class EventDrivenMonitor:
                 with self._perf_lock:
                     self._perf.clob_batch_ms = books_ms
                     self._perf.ws_books_fallback = len(http_books)
+                # region agent log (HTTP fallback books)
+                agent_log(
+                    location="services/cli/monitor_core.py:_snapshot_loop",
+                    message="http book fallback used",
+                    hypothesis_id="H2",
+                    data={"missing_tokens": len(missing_tokens), "fetched_books": len(http_books)},
+                )
+                # endregion
 
             perf = self._snapshot_perf(len(ws_state))
             live_snapshots: list[MatchSnapshot] = []
@@ -283,19 +360,7 @@ class EventDrivenMonitor:
             recently_ended: list[MatchSnapshot] = []
             for mapping, op_fixture, pm_fixture, league_name in candidates:
                 odds_payload = self._odds_cache.get(str(op_fixture.source_id))
-                gamma_start = time.perf_counter()
-                pm_latest = await _get_pm_latest_cached_async(
-                    polymarket=self._polymarket,
-                    cache=self._pm_status_cache,
-                    market_id=str(pm_fixture.source_id),
-                    now=now,
-                    ttl=self._pm_status_ttl,
-                    semaphore=self._gamma_sem,
-                )
-                gamma_ms = (time.perf_counter() - gamma_start) * 1000
-                with self._perf_lock:
-                    self._perf.gamma_ms_total += gamma_ms
-                    self._perf.gamma_calls += 1
+                pm_latest = pm_latest_by_market_id.get(str(pm_fixture.source_id))
                 snapshot, ended = _build_snapshot_from_cache(
                     mapping=mapping,
                     op_fixture=op_fixture,
@@ -328,22 +393,7 @@ class EventDrivenMonitor:
                         upcoming_snapshots.append(snapshot)
 
             focus_match, focus_game1 = _select_focuses(live_snapshots, recently_ended)
-
-            if (
-                focus_match
-                and focus_match.edge.best_edge is not None
-                and focus_match.edge.best_edge >= self._edge_threshold
-            ):
-                last_ts = self._last_alert.get(focus_match.mapping_id, 0.0)
-                if time.time() - last_ts >= self._alert_cooldown:
-                    alert_text = (
-                        f"{focus_match.match}: edge {focus_match.edge.best_edge:+.2%} "
-                        f"({focus_match.edge.best_side})"
-                    )
-                    self._last_alert[focus_match.mapping_id] = time.time()
-                    logger.info("ALERT %s", alert_text)
-                    self._alerts_buffer.add(alert_text)
-                    self._log_buffer.add(f"ALERT {alert_text}")
+            ws_connected = self._ws_manager.is_connected()
             with self._state_lock:
                 self._live_state.snapshots = live_snapshots
                 self._live_state.recently_ended = recently_ended
@@ -352,6 +402,7 @@ class EventDrivenMonitor:
                 self._live_state.focus_game1 = focus_game1
                 self._live_state.last_update = now
                 self._live_state.perf = perf
+                self._live_state.ws_connected = ws_connected
             loop_ms = (time.perf_counter() - loop_start) * 1000
             with self._perf_lock:
                 self._perf.loop_ms = loop_ms
@@ -382,10 +433,18 @@ class EventDrivenMonitor:
 
     def _snapshot_perf(self, ws_assets: int) -> PerfStats:
         with self._perf_lock:
+            # Per-snapshot window deltas (avoid cumulative drift in UI)
+            odds_ms_window = self._perf.oddspapi_ms_total - self._last_perf_odds_ms_total
+            odds_calls_window = self._perf.oddspapi_calls - self._last_perf_odds_calls
+            self._last_perf_odds_ms_total = self._perf.oddspapi_ms_total
+            self._last_perf_odds_calls = self._perf.oddspapi_calls
+
             snapshot = PerfStats(
                 loop_ms=self._perf.loop_ms,
                 oddspapi_ms_total=self._perf.oddspapi_ms_total,
                 oddspapi_calls=self._perf.oddspapi_calls,
+                oddspapi_ms_window=odds_ms_window,
+                oddspapi_calls_window=odds_calls_window,
                 clob_batch_ms=self._perf.clob_batch_ms,
                 gamma_ms_total=self._perf.gamma_ms_total,
                 gamma_calls=self._perf.gamma_calls,
@@ -396,6 +455,65 @@ class EventDrivenMonitor:
             self._perf.clob_batch_ms = None
             self._perf.ws_books_fallback = 0
         return snapshot
+
+    def _build_trade_event(
+        self,
+        event_type: str,
+        now: datetime,
+        mapping: Mapping,
+        pm_fixture: Fixture,
+        snapshot: MatchSnapshot,
+        side: str | None = None,
+        reason: str | None = None,
+        details: str | None = None,
+        position_id: str | None = None,
+        quantity: float | None = None,
+        limit_price: float | None = None,
+        avg_fill_price: float | None = None,
+        size_available: float | None = None,
+        net_edge: float | None = None,
+        exit_price: float | None = None,
+        pnl_percent: float | None = None,
+        raw_json: dict | None = None,
+    ) -> TradeEvent:
+        payload = dict(raw_json or {})
+        return TradeEvent(
+            ts=now,
+            run_id=self._run_id,
+            event_type=event_type,
+            mode="paper",
+            mapping_id=mapping.id,
+            pm_fixture_id=pm_fixture.id,
+            position_id=position_id,
+            market_type=snapshot.market_type,
+            game_number=snapshot.game_number,
+            side=side,
+            reason=reason,
+            details=details,
+            edge_threshold=self._edge_threshold,
+            spread_factor=self._spread_factor,
+            alpha_min=settings.alpha_min,
+            alpha_spread_factor=settings.alpha_spread_factor,
+            exit_epsilon=settings.exit_epsilon,
+            p_ref_a=snapshot.p_ref_a,
+            p_ref_b=snapshot.p_ref_b,
+            bid_a=snapshot.bid_a,
+            ask_a=snapshot.ask_a,
+            mid_a=snapshot.mid_a,
+            bid_b=snapshot.bid_b,
+            ask_b=snapshot.ask_b,
+            mid_b=snapshot.mid_b,
+            best_edge=snapshot.edge.best_edge,
+            best_side=snapshot.edge.best_side,
+            quantity=quantity,
+            limit_price=limit_price,
+            avg_fill_price=avg_fill_price,
+            size_available=size_available,
+            net_edge=net_edge,
+            exit_price=exit_price,
+            pnl_percent=pnl_percent,
+            raw_json=payload,
+        )
 
     def _process_trade_signals(
         self,
@@ -409,12 +527,17 @@ class EventDrivenMonitor:
     ) -> None:
         fixture_id = str(op_fixture.source_id)
         trigger_record = self._triggers.get(fixture_id)
+        if ended:
+            # Market is over: stop new entries; only exit open trades.
+            self._check_for_exits(mapping, pm_fixture, snapshot, now, ended, trigger_record)
+            return
         if trigger_record and (now - trigger_record.ts) > timedelta(minutes=TRIGGER_TTL_MINUTES):
             self._triggers.pop(fixture_id, None)
             trigger_record = None
 
         if trigger_record and not trigger_record.logged:
             trigger = trigger_record.trigger
+            delta = _select_trigger_delta(trigger)
             self._trade_buffer.add(
                 _format_trade_line(
                     event="TRIGGER",
@@ -422,13 +545,26 @@ class EventDrivenMonitor:
                     market_type=snapshot.market_type,
                     game_number=snapshot.game_number,
                     side=None,
-                    details=(
-                        f"type={trigger.trigger_type} "
-                        f"delta_a={_format_delta(trigger.delta_p_ref_a)} "
-                        f"delta_b={_format_delta(trigger.delta_p_ref_b)}"
-                    ),
+                    details=f"delta={_format_pct(delta)} ({trigger.trigger_type})",
                 )
             )
+            with SessionLocal() as db:
+                event = self._build_trade_event(
+                    event_type="TRIGGER",
+                    now=now,
+                    mapping=mapping,
+                    pm_fixture=pm_fixture,
+                    snapshot=snapshot,
+                    reason=trigger.trigger_type,
+                    details=f"delta={_format_pct(delta)}",
+                    raw_json={
+                        "trigger_type": trigger.trigger_type,
+                        "delta_p_ref_a": trigger.delta_p_ref_a,
+                        "delta_p_ref_b": trigger.delta_p_ref_b,
+                    },
+                )
+                db.add(event)
+                db.commit()
             trigger_record.logged = True
 
         entry_candidates = _build_entry_candidates(op_fixture, pm_fixture, snapshot, ws_state)
@@ -446,6 +582,18 @@ class EventDrivenMonitor:
                         details="no_depth",
                     )
                 )
+                with SessionLocal() as db:
+                    event = self._build_trade_event(
+                        event_type="ENTRY_CHECK",
+                        now=now,
+                        mapping=mapping,
+                        pm_fixture=pm_fixture,
+                        snapshot=snapshot,
+                        reason="no_depth",
+                        details="no_depth",
+                    )
+                    db.add(event)
+                    db.commit()
             else:
                 side = best["side"]
                 entry = best["entry"]
@@ -458,9 +606,22 @@ class EventDrivenMonitor:
                             market_type=snapshot.market_type,
                             game_number=snapshot.game_number,
                             side=side,
-                            details="already_open",
+                            details="skip already_open",
                         )
                     )
+                    with SessionLocal() as db:
+                        event = self._build_trade_event(
+                            event_type="ENTRY_SKIP",
+                            now=now,
+                            mapping=mapping,
+                            pm_fixture=pm_fixture,
+                            snapshot=snapshot,
+                            side=side,
+                            reason="already_open",
+                            details="skip already_open",
+                        )
+                        db.add(event)
+                        db.commit()
                 elif entry["actionable"]:
                     size_available = float(entry["size_available"] or 0.0)
                     quantity = min(PROBE_QUANTITY, size_available) if size_available else PROBE_QUANTITY
@@ -482,6 +643,73 @@ class EventDrivenMonitor:
                         net_edge=entry["net_edge"],
                         p_ref_entry=best["p_ref"],
                     )
+                    entry_raw = {
+                        "mapping_id": str(mapping.id),
+                        "market_id": str(pm_fixture.id),
+                        "market_type": snapshot.market_type,
+                        "game_number": snapshot.game_number,
+                        "side": "A" if side == "buy_a" else "B",
+                        "trigger_type": trade.trigger_type,
+                        "trigger_ts": trade.trigger_ts.isoformat() if trade.trigger_ts else None,
+                        "entry_ts": trade.entry_ts.isoformat(),
+                        "entry_price": trade.entry_price,
+                        "limit_price": trade.limit_price,
+                        "size_available": trade.size_available,
+                        "quantity": trade.quantity,
+                        "alpha": trade.alpha,
+                        "net_edge": trade.net_edge,
+                        "p_ref_entry": trade.p_ref_entry,
+                    }
+                    with SessionLocal() as db:
+                        position = Position(
+                            mapping_id=mapping.id,
+                            pm_fixture_id=pm_fixture.id,
+                            mode="paper",
+                            venue="paper",
+                            market_type=snapshot.market_type or "unknown",
+                            game_number=snapshot.game_number,
+                            side=entry_raw["side"],
+                            opened_at=now,
+                            entry_price=trade.entry_price,
+                            entry_p_ref=trade.p_ref_entry,
+                            entry_alpha=trade.alpha,
+                            entry_edge=trade.net_edge,
+                            quantity=trade.quantity,
+                            trigger_type=trade.trigger_type,
+                            raw_json=entry_raw,
+                        )
+                        db.add(position)
+                        db.flush()
+                        event = self._build_trade_event(
+                            event_type="ENTRY",
+                            now=now,
+                            mapping=mapping,
+                            pm_fixture=pm_fixture,
+                            snapshot=snapshot,
+                            side=side,
+                            reason="entry",
+                            details=f"edge={_format_pct(trade.net_edge)}",
+                            position_id=position.id,
+                            quantity=trade.quantity,
+                            limit_price=trade.limit_price,
+                            avg_fill_price=trade.entry_price,
+                            size_available=size_available,
+                            net_edge=trade.net_edge,
+                            raw_json={
+                                "entry_price": trade.entry_price,
+                                "limit_price": trade.limit_price,
+                                "alpha": trade.alpha,
+                                "p_ref_entry": trade.p_ref_entry,
+                                "trigger_type": trade.trigger_type,
+                                "trigger_ts": trade.trigger_ts.isoformat()
+                                if trade.trigger_ts
+                                else None,
+                            },
+                        )
+                        db.add(event)
+                        db.commit()
+                        db.refresh(position)
+                        trade.db_position_id = str(position.id)
                     self._open_trades[key] = trade
                     self._trade_buffer.add(
                         _format_trade_line(
@@ -491,15 +719,13 @@ class EventDrivenMonitor:
                             game_number=snapshot.game_number,
                             side=side,
                             details=(
-                                f"avg_fill={trade.entry_price:.3f} "
-                                f"limit={trade.limit_price:.3f} "
-                                f"edge={_format_pct(trade.net_edge)} "
-                                f"alpha={trade.alpha:.3f} "
-                                f"qty={trade.quantity:.0f}/{trade.size_available:.0f}"
+                                f"@ {trade.entry_price:.3f} "
+                                f"(edge={_format_pct(trade.net_edge)})"
                             ),
                         )
                     )
                 else:
+                    size_available = float(entry["size_available"] or 0.0)
                     self._trade_buffer.add(
                         _format_trade_line(
                             event="ENTRY_SKIP",
@@ -508,12 +734,32 @@ class EventDrivenMonitor:
                             game_number=snapshot.game_number,
                             side=side,
                             details=(
-                                f"edge={_format_pct(entry['net_edge'])} "
+                                f"skip edge={_format_pct(entry['net_edge'])} "
                                 f"alpha={best['alpha']:.3f} "
                                 f"size={entry['size_available']:.0f}"
                             ),
                         )
                     )
+                    with SessionLocal() as db:
+                        event = self._build_trade_event(
+                            event_type="ENTRY_SKIP",
+                            now=now,
+                            mapping=mapping,
+                            pm_fixture=pm_fixture,
+                            snapshot=snapshot,
+                            side=side,
+                            reason="edge_below_threshold",
+                            details=(
+                                f"edge={_format_pct(entry['net_edge'])} "
+                                f"alpha={best['alpha']:.3f} "
+                                f"size={entry['size_available']:.0f}"
+                            ),
+                            net_edge=entry["net_edge"],
+                            size_available=size_available,
+                            limit_price=entry["limit_price"],
+                        )
+                        db.add(event)
+                        db.commit()
 
         self._check_for_exits(mapping, pm_fixture, snapshot, now, ended, trigger_record)
 
@@ -541,6 +787,55 @@ class EventDrivenMonitor:
             catchup_s = _format_seconds(now - trade.trigger_ts) if trade.trigger_ts else "n/a"
             hold_s = _format_seconds(now - trade.entry_ts)
             reason = "market_ended" if ended else "convergence"
+            pnl_pct = None
+            if bid is not None and trade.entry_price:
+                pnl_pct = (bid - trade.entry_price) / trade.entry_price
+            if trade.db_position_id:
+                with SessionLocal() as db:
+                    position = db.get(Position, trade.db_position_id)
+                    if position:
+                        position.closed_at = now
+                        position.exit_price = bid
+                        position.exit_p_ref = p_ref
+                        position.exit_reason = reason
+                        if bid is not None:
+                            position.pnl_absolute = bid - position.entry_price
+                            position.pnl_percent = (
+                                (bid - position.entry_price) / position.entry_price
+                            )
+                        position.hold_seconds = (now - position.opened_at).total_seconds()
+                        if position.entry_edge and position.pnl_percent is not None:
+                            position.edge_capture = position.pnl_percent / position.entry_edge
+                        raw_json = dict(position.raw_json or {})
+                        raw_json["exit"] = {
+                            "exit_ts": now.isoformat(),
+                            "exit_price": bid,
+                            "exit_p_ref": p_ref,
+                            "exit_reason": reason,
+                            "pnl_percent": position.pnl_percent,
+                        }
+                        position.raw_json = raw_json
+                        event = self._build_trade_event(
+                            event_type="EXIT",
+                            now=now,
+                            mapping=mapping,
+                            pm_fixture=pm_fixture,
+                            snapshot=snapshot,
+                            side=trade.side,
+                            reason=reason,
+                            details=f"pnl={_format_pct(pnl_pct)}",
+                            position_id=position.id,
+                            exit_price=bid,
+                            pnl_percent=position.pnl_percent,
+                            raw_json={
+                                "exit_reason": reason,
+                                "exit_price": bid,
+                                "exit_p_ref": p_ref,
+                                "pnl_percent": position.pnl_percent,
+                            },
+                        )
+                        db.add(event)
+                        db.commit()
             self._trade_buffer.add(
                 _format_trade_line(
                     event="EXIT",
@@ -549,11 +844,10 @@ class EventDrivenMonitor:
                     game_number=snapshot.game_number,
                     side=trade.side,
                     details=(
-                        f"bid={_format_price(bid)} "
-                        f"gap={_format_pct(exit_gap)} "
-                        f"catchup={catchup_s} "
-                        f"hold={hold_s} "
-                        f"reason={reason}"
+                        f"@ {_format_price(bid)} "
+                        f"| P&L: {_format_pct(pnl_pct)} "
+                        f"| hold={hold_s} "
+                        f"| reason={reason}"
                     ),
                 )
             )
@@ -580,6 +874,22 @@ class EventDrivenMonitor:
                         details=f"time={_format_seconds(now - trigger_record.ts)}",
                     )
                 )
+                with SessionLocal() as db:
+                    event = self._build_trade_event(
+                        event_type="CATCHUP",
+                        now=now,
+                        mapping=mapping,
+                        pm_fixture=pm_fixture,
+                        snapshot=snapshot,
+                        side=side,
+                        reason="catchup",
+                        details=f"time={_format_seconds(now - trigger_record.ts)}",
+                        raw_json={
+                            "catchup_seconds": (now - trigger_record.ts).total_seconds(),
+                        },
+                    )
+                    db.add(event)
+                    db.commit()
 
 
 def _load_candidate_mappings(
@@ -744,7 +1054,21 @@ def _build_snapshot_from_cache(
                 odds_payload.get("updatedAt"),
             ]
         )
-        odds_live = status_id == 1 or _recent_enough(odds_changed_at, now, minutes=10)
+        started_recently = False
+        if op_fixture.start_time:
+            try:
+                started_recently = (
+                    op_fixture.start_time <= now
+                    and (now - op_fixture.start_time).total_seconds() <= stale_minutes * 60
+                )
+            except TypeError:
+                started_recently = False
+        odds_live = bool(
+            status_id == 1
+            or getattr(op_fixture, "status", "") == "live"
+            or started_recently
+            or _recent_enough(odds_changed_at, now, minutes=10)
+        )
         if status_id == 1:
             odds_status_label = "LIVE"
         elif status_id == 0:
@@ -771,13 +1095,20 @@ def _build_snapshot_from_cache(
         if pm_ended:
             ended = True
 
-    outcomes = _parse_outcomes(pm_fixture.raw_json or {})
-    token_ids = _parse_token_ids(pm_fixture.raw_json or {})
-    outcome_pairs = _pair_outcomes_with_tokens(op_fixture, outcomes, token_ids)
+    # Prefer fresh Gamma payload for tokens/outcomes (markets can change during pauses).
+    market_raw = pm_latest if isinstance(pm_latest, dict) else (pm_fixture.raw_json or {})
+    outcome_pairs = _extract_outcome_token_pairs(market_raw)
+    if not outcome_pairs:
+        outcomes = _parse_outcomes(market_raw)
+        token_ids = _extract_token_ids(market_raw)
+        outcome_pairs = _pair_outcomes_with_tokens(op_fixture, outcomes, token_ids)
+    else:
+        token_ids = [token_id for _, token_id in outcome_pairs if token_id]
 
     source_note = "WS"
     bid_a = ask_a = bid_b = ask_b = None
     mid_a = mid_b = None
+    pm_price_finished = False
 
     if outcome_pairs and all(p[1] for p in outcome_pairs):
         for outcome_name, token_id in outcome_pairs:
@@ -798,12 +1129,47 @@ def _build_snapshot_from_cache(
     else:
         source_note = "No WS tokens"
 
+    # region agent log (live classification + odds/ws merge)
+    agent_log(
+        location="services/cli/monitor_core.py:_build_snapshot_from_cache",
+        message="snapshot merge computed",
+        hypothesis_id="H3",
+        data={
+            "fixture_id": str(op_fixture.source_id),
+            "op_status": getattr(op_fixture, "status", None),
+            "odds_statusId": odds_payload.get("statusId") if isinstance(odds_payload, dict) else None,
+            "odds_live": bool(odds_live),
+            "ended": bool(ended),
+            "pm_resolution": pm_resolution,
+            "pm_closed": bool(pm_closed),
+            "pm_active": bool(pm_active),
+            "market_type": market_type,
+            "game_number": game_number,
+            "tokens_n": len([t for t in token_ids if t]),
+            "ws_have_a": bid_a is not None or ask_a is not None,
+            "ws_have_b": bid_b is not None or ask_b is not None,
+            "source_note": source_note,
+        },
+    )
+    # endregion
+
     if bid_a is not None and ask_a is not None:
         mid_a = (bid_a + ask_a) / 2
     if bid_b is not None and ask_b is not None:
         mid_b = (bid_b + ask_b) / 2
 
-    if ended and not pm_ended and (
+    # If Polymarket is effectively at certainty, treat market as finished.
+    a_max = max([v for v in (bid_a, ask_a) if v is not None], default=None)
+    b_max = max([v for v in (bid_b, ask_b) if v is not None], default=None)
+    pm_price_finished = bool(
+        (a_max is not None and a_max >= 0.995) or (b_max is not None and b_max >= 0.995)
+    )
+    if pm_price_finished:
+        ended = True
+        if not pm_resolution:
+            pm_resolution = "PM_FINISHED"
+
+    if ended and not pm_ended and (not pm_price_finished) and (
         (bid_a is not None or ask_a is not None) or (bid_b is not None or ask_b is not None)
     ):
         ended = False
@@ -814,7 +1180,7 @@ def _build_snapshot_from_cache(
             cooldown_seconds=60,
         )
 
-    if pm_fixture.raw_json and pm_fixture.raw_json.get("closed") is True:
+    if market_raw and market_raw.get("closed") is True:
         ended = True
 
     if ended:
@@ -1031,11 +1397,44 @@ def _normalize(value: str | None) -> str:
 
 
 def _is_team_a(fixture: Fixture, outcome: str) -> bool:
-    return _normalize(outcome) == _normalize(fixture.team_a_name)
+    out = _normalize(outcome)
+    team = _normalize(fixture.team_a_name)
+    return bool(out and team and (out == team or out in team or team in out))
 
 
 def _is_team_b(fixture: Fixture, outcome: str) -> bool:
-    return _normalize(outcome) == _normalize(fixture.team_b_name)
+    out = _normalize(outcome)
+    team = _normalize(fixture.team_b_name)
+    return bool(out and team and (out == team or out in team or team in out))
+
+
+def _extract_outcome_token_pairs(raw: dict) -> list[tuple[str, str]]:
+    tokens = raw.get("tokens") or []
+    if isinstance(tokens, str):
+        try:
+            import json
+
+            tokens = json.loads(tokens)
+        except (json.JSONDecodeError, TypeError):
+            tokens = []
+    pairs: list[tuple[str, str]] = []
+    if isinstance(tokens, list):
+        for token in tokens:
+            if not isinstance(token, dict):
+                continue
+            token_id = token.get("token_id") or token.get("tokenId") or token.get("id")
+            outcome = token.get("outcome") or token.get("name") or token.get("title")
+            if token_id and outcome:
+                pairs.append((str(outcome), str(token_id)))
+    return pairs
+
+
+def _extract_token_ids(raw: dict) -> list[str]:
+    # Prefer explicit token objects when available, otherwise fall back to clobTokenIds.
+    token_ids = [token_id for _, token_id in _extract_outcome_token_pairs(raw) if token_id]
+    if token_ids:
+        return token_ids
+    return _parse_token_ids(raw)
 
 
 def _extract_pm_resolution_status(pm_latest: dict) -> str:
@@ -1111,6 +1510,14 @@ def _latest_changed_at(values: list[str | None]) -> datetime | None:
     for value in values:
         if not value:
             continue
+        if isinstance(value, (int, float)):
+            try:
+                ts = float(value)
+                if ts > 10_000_000_000:  # ms -> s
+                    ts = ts / 1000.0
+                return datetime.fromtimestamp(ts, tz=timezone.utc)
+            except (TypeError, ValueError, OSError):
+                continue
         try:
             parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
             if parsed.tzinfo is None:
@@ -1208,6 +1615,30 @@ def _trade_key(mapping: Mapping, pm_fixture: Fixture, side: str) -> str:
     return f"{mapping.id}:{pm_fixture.id}:{side}"
 
 
+def _format_side_label(event: str, side: str | None) -> str:
+    if not side:
+        return "-"
+    if side == "buy_a":
+        token = "A"
+    elif side == "buy_b":
+        token = "B"
+    else:
+        return side.upper()
+
+    if event in {"ENTRY", "ENTRY_SKIP", "ENTRY_CHECK"}:
+        return f"BUY {token}"
+    if event == "EXIT":
+        return f"SELL {token}"
+    return token
+
+
+def _select_trigger_delta(trigger: TriggerEvent) -> float | None:
+    deltas = [d for d in (trigger.delta_p_ref_a, trigger.delta_p_ref_b) if d is not None]
+    if not deltas:
+        return None
+    return max(deltas, key=lambda value: abs(value))
+
+
 def _format_trade_line(
     event: str,
     match: str,
@@ -1217,8 +1648,10 @@ def _format_trade_line(
     details: str,
 ) -> str:
     market_label = format_market_label(market_type, game_number)
-    side_label = side.upper() if side else "-"
-    return f"{event:<10} {match} | {market_label} | {side_label} | {details}"
+    side_label = _format_side_label(event, side)
+    if side_label == "-" or not details:
+        return f"{event:<10} {match} | {market_label} | {details}"
+    return f"{event:<10} {match} | {market_label} | {side_label} {details}"
 
 
 def _format_pct(value: float | None) -> str:

@@ -23,7 +23,7 @@ from shared.polymarket_client import PolymarketClient
 logger = logging.getLogger(__name__)
 
 # Target leagues (normalized names for matching)
-TARGET_LEAGUE_PATTERNS = ["lck", "lpl", "lec", "lcs", "lta", "lcp"]
+TARGET_LEAGUE_PATTERNS = settings.target_league_patterns
 TEAM_SUFFIXES = {"esports", "e-sports", "gaming", "team"}
 
 

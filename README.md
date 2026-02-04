@@ -14,9 +14,9 @@ When Pinnacle moves, there's a brief window where Polymarket is stale. We detect
 
 Two-mode CLI system:
 1. **Discovery** (`cli discover`) — on-demand collection of upcoming matches
-2. **Monitor** (`cli monitor`) — real-time odds comparison during live matches
+2. **Live** (`cli live`) — real-time odds comparison during live matches
 
-Target leagues: LCK, LPL, LEC, LCS/LTA, LCP (top 5 LoL leagues)
+Target leagues: LCK, LPL, LEC, LCS/LTA, LCP, CBLOL (top 6 LoL leagues)
 
 ## Prerequisites
 
@@ -108,46 +108,12 @@ Options:
 - `--dry-run` — don't write to database
 - `--verbose` / `-v` — enable debug logging
 
-### Monitor — watch live matches
+### Live — watch live matches
 
 ```bash
 cd services
-python -m cli monitor
+python -m cli live
 ```
-
-Expected output (when matches are live):
-```
-👁️  Starting live monitor...
-   Poll interval: 5s
-   Gap threshold: 5.0%
-
-[14:32:05] Monitoring 2 live match(es):
-
-   📊 T1 vs Gen.G (LCK)
-      Pinnacle: T1 @ 1.45 (68.9%) | Gen.G @ 2.85 (35.1%)
-      Polymarket: T1 bid=0.65 ask=0.68 mid=0.665
-      Gap: +2.4% on T1 (below threshold)
-
-   📊 BLG vs JDG (LPL)
-      Pinnacle: BLG @ 1.38 (72.5%) | JDG @ 3.10 (32.3%)
-      Polymarket: BLG bid=0.70 ask=0.73 mid=0.715
-      Gap: +1.0% on BLG (below threshold)
-```
-
-When gap exceeds threshold:
-```
-   📊 T1 vs Gen.G (LCK)
-      Pinnacle: T1 @ 1.30 (76.9%) ← MOVED
-      Polymarket: T1 bid=0.65 ask=0.68 mid=0.665
-      Gap: +10.4% on T1 ⚠️  ABOVE THRESHOLD
-      📝 SHADOW ORDER recorded: buy_a
-```
-
-Options:
-- `--interval N` — poll interval in seconds (default: 5)
-- `--threshold N` — gap threshold for shadow orders (default: 0.05)
-- `--verbose` / `-v` — enable debug logging
-
 ### Live TUI — stationary live view (read-only)
 
 ```bash
@@ -215,7 +181,7 @@ Environment variables:
 | `DATABASE_URL` | Postgres connection string | required |
 | `ODDS_API_KEY` | OddsPapi API key | optional |
 | `POLY_API_KEY` | Polymarket API key | optional |
-| `TARGET_LEAGUES` | Comma-separated league names | `LCK,LPL,LEC,LCS,LTA,LCP` |
+| `TARGET_LEAGUES` | Comma-separated league names | `LCK,LPL,LEC,LCS,LTA,LCP,CBLOL` |
 | `SHADOW_GAP_THRESHOLD` | Gap threshold for shadow orders | `0.05` |
 | `MONITOR_POLL_INTERVAL_SECONDS` | Monitor poll interval | `5` |
 
@@ -250,5 +216,5 @@ docker compose -f infra/docker-compose.yml up --build
 
 - No UI
 - No actual order execution (shadow orders only)
-- No broad market discovery (only LoL top 5 leagues)
+- No broad market discovery (only LoL top 6 leagues)
 - No continuous background polling

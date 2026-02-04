@@ -40,12 +40,12 @@ class Settings(BaseSettings):
     polymarket_game_bets_tag_id: int = 100639  # Game bets tag for LoL
 
     # Polymarket WebSocket
-    ws_ping_interval_seconds: int = 10
+    ws_ping_interval_seconds: int = 5  # Send keepalive every 5 seconds
     ws_reconnect_base_seconds: float = 1.0
     ws_reconnect_max_seconds: float = 30.0
 
     # Target leagues (comma-separated)
-    target_leagues: str = "LCK,LPL,LEC,LCS,LTA,LCP"
+    target_leagues: str = "LCK,LPL,LEC,LCS,LTA,LCP,CBLOL"
 
     # Cooldowns (milliseconds) - OddsPapi rate limits
     # Discovery can be slower; live odds should be fast.
@@ -88,6 +88,31 @@ class Settings(BaseSettings):
     def target_league_list(self) -> list[str]:
         """Return target leagues as a list."""
         return [league.strip().upper() for league in self.target_leagues.split(",")]
+
+    @property
+    def target_league_patterns(self) -> list[str]:
+        """Return normalized league patterns for keyword matching."""
+        patterns: list[str] = []
+        for league in self.target_league_list:
+            normalized = "".join(
+                ch.lower() if ch.isalnum() or ch.isspace() else " " for ch in league
+            )
+            tokens = [token for token in normalized.split() if token]
+            if not tokens:
+                continue
+            if len(tokens) == 1:
+                patterns.append(tokens[0])
+            else:
+                patterns.append(" ".join(tokens))
+                patterns.extend(tokens)
+
+        unique: list[str] = []
+        seen: set[str] = set()
+        for pattern in patterns:
+            if pattern not in seen:
+                seen.add(pattern)
+                unique.append(pattern)
+        return unique
 
 
 settings = Settings()

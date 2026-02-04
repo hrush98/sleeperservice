@@ -18,13 +18,13 @@ Two-mode system for detecting lead–lag inefficiencies between Pinnacle (via Od
 │ 1. Fetch leagues/teams   │   │ 1. Poll OddsPapi /odds           │
 │ 2. Fetch fixtures        │   │ 2. Poll Polymarket CLOB          │
 │ 3. Build mappings        │   │ 3. Compare → compute gap         │
-│                          │   │ 4. Record shadow orders          │
+│                          │   │ 4. Record positions + events     │
 └────────────┬─────────────┘   └──────────────┬───────────────────┘
              │                                │
              v                                v
 ┌─────────────────────────────────────────────────────────────────┐
 │                          POSTGRES                               │
-│  leagues │ teams │ fixtures │ mappings │ odds_snapshots │ shadow│
+│  leagues │ teams │ fixtures │ mappings │ odds_snapshots │ trade_events │ positions │
 └─────────────────────────────────────────────────────────────────┘
              ^
              │ SQL reads (ops only)
@@ -46,7 +46,7 @@ Two-mode system for detecting lead–lag inefficiencies between Pinnacle (via Od
 ### OddsPapi flow
 ```
 /v4/tournaments?sportId=18
-    → Filter to: LCK, LPL, LEC, LCS, LCP
+    → Filter to: LCK, LPL, LEC, LCS/LTA, LCP, CBLOL
     → Store in: leagues table
 
 /v4/participants?sportId=18
@@ -142,12 +142,12 @@ OddsPapi /odds (hot only) ──────► p_ref updates (in-memory)
 Polymarket WS book state ───────► top-of-book + depth (in-memory)
                                    │
                                    v (if edge > threshold)
-                              shadow_orders / alerts
+                          positions + trade_events / alerts
 ```
 
 ---
 
-## Database tables (6 total)
+## Database tables (8 total)
 
 | Table | Purpose | Write mode |
 |-------|---------|------------|
@@ -156,7 +156,9 @@ Polymarket WS book state ───────► top-of-book + depth (in-memory
 | fixtures | Upcoming/live matches + event/market type/number + parent | Upsert |
 | mappings | OddsPapi ↔ Polymarket links | Upsert |
 | odds_snapshots | Live price time series | Append-only |
-| shadow_orders | Paper trade decisions | Append-only |
+| shadow_orders | Paper trade decisions (legacy) | Append-only |
+| positions | Trade lifecycle (paper/real) | Append-only + update on exit |
+| trade_events | Trade decision/execution tape | Append-only |
 
 ---
 
@@ -170,7 +172,11 @@ Polymarket WS book state ───────► top-of-book + depth (in-memory
   "fixtures": {"oddspapi": 15, "polymarket": 12},
   "mappings": {"total": 10, "high_confidence": 8},
   "last_discovery": "2026-01-24T10:00:00Z",
-  "live_matches": 2
+  "live_matches": 2,
+  "odds_snapshots": 1200,
+  "shadow_orders": 0,
+  "positions": 5,
+  "trade_events": 42
 }
 ```
 
