@@ -38,14 +38,22 @@ class Settings(BaseSettings):
     polymarket_ws_url: str = "wss://ws-subscriptions-clob.polymarket.com"
     poly_api_key: str | None = None
     polymarket_game_bets_tag_id: int = 100639  # Game bets tag for LoL
+    polymarket_keyfile_path: str = "~/.sleeprservice/keys/polymarket.key.age"
+    polymarket_chain_id: int = 137
+    polymarket_signature_type: int = 0  # EOA
+    polymarket_funder_address: str | None = None  # Set for proxy wallets (Polymarket displayed address)
+    polymarket_token_decimals: int = 6
 
     # Polymarket WebSocket
     ws_ping_interval_seconds: int = 5  # Send keepalive every 5 seconds
     ws_reconnect_base_seconds: float = 1.0
     ws_reconnect_max_seconds: float = 30.0
+    user_ws_enabled: bool = True
+    user_ws_placement_timeout_seconds: float = 10.0
+    user_ws_untracked_timeout_seconds: float = 60.0
 
     # Target leagues (comma-separated)
-    target_leagues: str = "LCK,LPL,LEC,LCS,LTA,LCP,CBLOL"
+    target_leagues: str = "LCK,LPL,LEC,LCS,LTA,LCP,CBLOL,LFL"
 
     # Cooldowns (milliseconds) - OddsPapi rate limits
     # Discovery can be slower; live odds should be fast.
@@ -61,15 +69,34 @@ class Settings(BaseSettings):
     hot_fixture_poll_ms: int = 500
     hot_fixture_ttl_seconds: int = 60
 
+    # Pinnacle display classification
+    pin_pre_fresh_minutes: int = 10
+    starting_soon_minutes: int = 15
+    starting_soon_grace_minutes: int = 60
+    # Consider a market "done" when one side is near 1.0 and the other near 0.0.
+    # This guards against thin-book transient prints by requiring BOTH extremes.
+    pm_done_threshold_high: float = 0.995
+    pm_done_threshold_low: float = 0.01
+
+    # OddsPapi league poll cadence (seconds)
+    oddspapi_league_poll_seconds_pre: float = 5.0
+    oddspapi_league_poll_seconds_inplay: float = 1.0
+
     # Live concurrency caps (async)
     oddspapi_max_concurrent_live: int = 4
     polymarket_gamma_max_concurrent_live: int = 4
     polymarket_clob_max_concurrent_live: int = 2
 
+    # Polymarket Gamma refresh cadence (seconds)
+    polymarket_gamma_refresh_seconds: float = 15.0
+
     # Trigger thresholds
     trigger_primary_threshold: float = 0.02
     trigger_burst_threshold: float = 0.05
     trigger_adaptive_multiplier: float = 3.0
+    trigger_edge_persist_threshold: float = 0.03
+    trigger_edge_persist_polls: int = 2
+    trigger_edge_spike_threshold: float = 0.04
 
     # Edge calculation
     alpha_min: float = 0.03
@@ -79,6 +106,38 @@ class Settings(BaseSettings):
     # Live monitoring
     monitor_poll_interval_seconds: int = 5
     shadow_gap_threshold: float = 0.05  # 5% gap to record shadow order
+
+    # Trade loop cadence
+    trade_loop_idle_seconds: float = 0.5
+    trade_loop_hot_seconds: float = 0.05
+    entry_reeval_seconds: float = 3.0
+
+    # Live trading safeguards (only used in live mode)
+    live_max_usd_per_order: float = 2.0
+    live_max_shares_per_order: float = 50.0
+    live_max_open_positions: int = 2
+    live_min_seconds_between_orders: float = 3.0
+    live_share_step: float = 0.0001
+    live_kill_switch_path: str = "~/.sleeprservice/keys/STOP_TRADING"
+    live_require_allowance_check: bool = True
+    exit_order_not_found_seconds: float = 60.0
+    exit_phantom_id_null_threshold: int = 5
+    exit_max_attempts: int = 5
+    exit_retry_cooldown_seconds: float = 30.0
+
+    # Logging
+    # When running the live TUI, stdout logging is redirected into the on-screen buffer.
+    # These settings enable a "black box" rotating log file for postmortems.
+    log_dir: str = "logs"
+    live_log_backup_days: int = 14
+    live_log_per_run: bool = True
+    live_log_run_id_format: str = "%Y%m%d-%H%M%S"
+    live_log_include_pid: bool = True
+
+    # Display (CLI-only)
+    # Stored timestamps remain UTC; this is for human-friendly rendering.
+    # Use an IANA timezone name (e.g. "America/Los_Angeles").
+    display_timezone: str = "America/Los_Angeles"
 
     # API
     api_host: str = "0.0.0.0"

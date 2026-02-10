@@ -7,10 +7,10 @@ Usage:
 """
 
 import logging
-import sys
 
 import typer
 
+from cli.analyze import analyze_command
 from cli.discover import discover_command
 from cli.live import live_command
 
@@ -63,6 +63,12 @@ def live(
         "-i",
         help="Poll interval in seconds (overrides --speed)",
     ),
+    mode: str | None = typer.Option(
+        None,
+        "--mode",
+        "-m",
+        help="Trading mode: paper or live (prompted if omitted)",
+    ),
     speed: str = typer.Option(
         "MED",
         "--speed",
@@ -72,9 +78,6 @@ def live(
     ),
     edge_threshold: float = typer.Option(0.03, "--edge-threshold", help="Net edge threshold for alerts"),
     spread_factor: float = typer.Option(1.0, "--spread-factor", help="Spread penalty multiplier"),
-    min_confidence: float = typer.Option(0.7, "--min-confidence", help="Minimum mapping confidence"),
-    lookahead_minutes: int = typer.Option(30, "--lookahead-minutes", help="How far ahead to show matches"),
-    stale_minutes: int = typer.Option(180, "--stale-minutes", help="Minutes after start to treat as ended"),
     verbose: bool = typer.Option(False, "--verbose", "-v", help="Enable verbose logging"),
 ):
     """
@@ -93,11 +96,9 @@ def live(
         live_command(
             interval=interval,
             speed=speed,
+            mode=mode,
             edge_threshold=edge_threshold,
             spread_factor=spread_factor,
-            min_confidence=min_confidence,
-            lookahead_minutes=lookahead_minutes,
-            stale_minutes=stale_minutes,
         )
     except KeyboardInterrupt:
         typer.echo("\nLive monitor stopped.")
@@ -167,6 +168,35 @@ def status():
     typer.echo(f"Positions:     {positions}")
     typer.echo(f"Trade events:  {trade_events}")
     typer.echo(f"Last discovery: {last_discovery or 'Never'}")
+
+
+@app.command()
+def analyze(
+    days: int = typer.Option(7, "--days", "-d", help="Look back window in days"),
+    mode: str = typer.Option("paper", "--mode", "-m", help="paper | live | any"),
+    market_type: str = typer.Option(
+        "any",
+        "--market-type",
+        "-t",
+        help="match_winner | game_winner | any",
+    ),
+    limit: int = typer.Option(10, "--limit", "-l", help="Top positions to show"),
+    include_events: bool = typer.Option(True, "--events/--no-events", help="Include event counts"),
+):
+    """Analyze logged trades and positions from the DB."""
+    mode = mode.lower().strip()
+    market_type = market_type.lower().strip()
+    if mode not in {"paper", "live", "any"}:
+        raise typer.BadParameter("mode must be paper, live, or any")
+    if market_type not in {"match_winner", "game_winner", "any"}:
+        raise typer.BadParameter("market-type must be match_winner, game_winner, or any")
+    analyze_command(
+        days=days,
+        mode=mode,
+        market_type=market_type,
+        limit=limit,
+        include_events=include_events,
+    )
 
 
 def main():

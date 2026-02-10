@@ -4,6 +4,7 @@ Edge math utilities for live monitor (v0).
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 
@@ -100,13 +101,14 @@ def compute_entry_edge(
     asks: list[tuple[float, float]],
     quantity: float,
     alpha: float,
+    tick_size: float = 0.01,
 ) -> dict[str, float | None | bool]:
     """
     Compute entry edge using depth-aware average fill.
 
     Returns:
         actionable: bool
-        limit_price: float
+        limit_price: float  (rounded down to tick_size)
         size_available: float
         avg_fill: float | None
         net_edge: float | None
@@ -119,7 +121,8 @@ def compute_entry_edge(
             "avg_fill": None,
             "net_edge": None,
         }
-    limit_price = p_ref - alpha
+    # round(..., 9) eliminates IEEE-754 noise before flooring and after multiply-back
+    limit_price = round(math.floor(round((p_ref - alpha) / tick_size, 9)) * tick_size, 10)
     size_available = 0.0
     for price, size in asks:
         if price <= limit_price:

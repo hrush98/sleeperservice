@@ -701,6 +701,10 @@ class AsyncPolymarketClient:
 
         return results
 
+    @staticmethod
+    def _parse_book_item(data: dict) -> dict:
+        return PolymarketClient._parse_book_item(data)
+
 
 # Module-level convenience instance
 _client: PolymarketClient | None = None

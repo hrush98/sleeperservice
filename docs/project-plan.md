@@ -52,9 +52,9 @@ Mappings created: 6 (high confidence), 2 (review needed)
 ```
 
 ### Mode 2: Live Monitor (during matches)
-Runs when mapped matches go live. Compares odds in real-time.
+Runs when a mapped match goes live. The operator picks the match up front; the monitor only watches that match.
 
-**For each live mapped match:**
+**For the selected mapped match:**
 1. Poll OddsPapi `/v4/odds?fixtureId=X` for Pinnacle prices
 2. Extract **moneyline** and **game winner** (Game 1/2/3) prices
 3. Poll Polymarket CLOB orderbook for the corresponding market(s)
@@ -62,10 +62,17 @@ Runs when mapped matches go live. Compares odds in real-time.
 5. If gap exceeds threshold → record trade event and position (paper)
 6. Log everything for later analysis
 
+**Single-match trading policy:**
+- Operator selects the match before the TUI starts.
+- The live monitor polls, renders, and trades only that single match.
+- Use `r` to re-select without restarting the process.
+- Discovery remains separate; it only populates the DB for selection.
+
 **Output:**
 - Console logs showing live comparison
 - Trade events + positions stored in DB
 - Simple `/ops/live` endpoint showing current state
+- Rotating "black box" log file at `./logs/live-<paper|live>.log` for postmortems
 
 ---
 
@@ -157,6 +164,9 @@ OddsPapi sportId for LoL: **18**
 - `entry_edge` (double precision nullable)
 - `quantity` (double precision)
 - `trigger_type` (text nullable)
+- `status` (text; "submitted" | "confirmed" | "cancelled" | "closed")
+- `external_order_id` (text nullable)
+- `external_status` (text nullable)
 - `closed_at` (timestamptz nullable)
 - `exit_price` (double precision nullable)
 - `exit_p_ref` (double precision nullable)
@@ -164,6 +174,7 @@ OddsPapi sportId for LoL: **18**
 - `pnl_absolute` (double precision nullable)
 - `pnl_percent` (double precision nullable)
 - `hold_seconds` (double precision nullable)
+- `convergence_seconds` (double precision nullable)
 - `edge_capture` (double precision nullable)
 - `raw_json` (jsonb)
 
@@ -186,7 +197,7 @@ OddsPapi sportId for LoL: **18**
 - `best_edge` (double precision nullable)
 - `best_side` (text nullable)
 - `quantity`, `limit_price`, `avg_fill_price`, `size_available`, `net_edge` (double precision nullable)
-- `exit_price`, `pnl_percent` (double precision nullable)
+- `exit_price`, `pnl_percent`, `convergence_seconds` (double precision nullable)
 - `external_order_id`, `external_fill_id`, `external_status` (text nullable)
 - `raw_json` (jsonb)
 
@@ -204,18 +215,20 @@ OddsPapi sportId for LoL: **18**
 - CLI: `discover --days N`
 - Verification: See leagues, teams, fixtures, mappings in DB
 
-### M2 — Live Monitor (event-driven)
-- Implement OddsPapi league polling via `/v4/odds-by-tournaments` (1s cadence)
-- Implement hot fixture polling via `/v4/odds` (500ms when triggered)
+### M2 — Live Monitor (event-driven, single match)
+- Operator selects the match before the TUI starts
+- Implement OddsPapi league polling via `/v4/odds-by-tournaments` (1s in-play / 5s pre)
+- Implement hot fixture polling via `/v4/odds` (500ms, focus only)
 - Implement Polymarket WS book state (top-of-book + depth in memory)
+- Periodic Gamma refresh to keep market/token metadata fresh (focus only)
 - Trigger on Δp_ref thresholds + lock/unlock
 - Compare and compute edge using PM bid/ask
 - Record trade events + paper positions / alerts
-- CLI: `monitor` (watches live matches)
+- CLI: `live` (watches one selected match)
 
 ### M3 — Observability
 - `/ops/status` endpoint (counts, last update times)
-- `/ops/live` endpoint (current live matches + latest gaps)
+- `/ops/live` endpoint (current live match + latest gap)
 - Console output that makes sense
 
 ### M4 — Evaluation
@@ -226,6 +239,7 @@ OddsPapi sportId for LoL: **18**
 ### M5+ — Execution (gated)
 - Only after M4 shows consistent edge
 - Conservative limits, circuit breakers
+- Live mode supports taker-style FAK market orders (buy by USDC amount) with manual allowances and caps
 
 ---
 
@@ -266,8 +280,14 @@ python -m cli discover --days 7
 
 ### Live Monitor
 ```bash
-python -m cli monitor
+python -m cli live
 # Should output: WS connected, league polling, hot fixtures when triggered
+```
+
+### Live Trading (optional)
+```bash
+python -m cli live --mode live
+# Prompts for age passphrase, derives API creds, and only trades when signals fire
 ```
 
 ### API

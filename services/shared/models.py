@@ -17,7 +17,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import uuid4
 
-from sqlalchemy import DateTime, Float, ForeignKey, Index, String, Text, UniqueConstraint, func
+from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -248,6 +248,9 @@ class Position(Base):
     entry_edge: Mapped[float | None] = mapped_column(Float, nullable=True)
     quantity: Mapped[float] = mapped_column(Float, nullable=False)
     trigger_type: Mapped[str | None] = mapped_column(String, nullable=True)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="confirmed")
+    external_order_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    external_status: Mapped[str | None] = mapped_column(String, nullable=True)
 
     # Exit
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
@@ -259,6 +262,7 @@ class Position(Base):
     pnl_absolute: Mapped[float | None] = mapped_column(Float, nullable=True)
     pnl_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
     hold_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
+    convergence_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
     edge_capture: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     raw_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
@@ -270,6 +274,58 @@ class Position(Base):
         Index("ix_positions_mapping_opened", "mapping_id", "opened_at"),
         Index("ix_positions_opened", "opened_at"),
         Index("ix_positions_closed", "closed_at"),
+    )
+
+
+class OrderAttempt(Base):
+    """Execution attempt tracking for live orders (entry/exit)."""
+
+    __tablename__ = "order_attempts"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    position_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("positions.id"), nullable=False
+    )
+    run_id: Mapped[str] = mapped_column(UUID(as_uuid=True), nullable=False)
+    mode: Mapped[str] = mapped_column(String, nullable=False)
+
+    phase: Mapped[str] = mapped_column(String, nullable=False)  # "entry" | "exit"
+    side: Mapped[str] = mapped_column(String, nullable=False)  # "BUY" | "SELL"
+    token_id: Mapped[str] = mapped_column(String, nullable=False)
+    attempt_seq: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    limit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    requested_size: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    external_order_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    external_status: Mapped[str | None] = mapped_column(String, nullable=True)
+    matched_size: Mapped[float | None] = mapped_column(Float, nullable=True)
+    not_found_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    finalized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    final_state: Mapped[str | None] = mapped_column(String, nullable=True)
+    final_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    raw_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+    position: Mapped[Position] = relationship("Position")
+
+    __table_args__ = (
+        Index(
+            "ix_order_attempts_position_phase_seq",
+            "position_id",
+            "phase",
+            "attempt_seq",
+            unique=True,
+        ),
+        Index(
+            "ix_order_attempts_pending",
+            "finalized_at",
+            postgresql_where=text("finalized_at IS NULL"),
+        ),
+        Index("ix_order_attempts_external_order_id", "external_order_id"),
     )
 
 
@@ -325,6 +381,7 @@ class TradeEvent(Base):
     net_edge: Mapped[float | None] = mapped_column(Float, nullable=True)
     exit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     pnl_percent: Mapped[float | None] = mapped_column(Float, nullable=True)
+    convergence_seconds: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     external_order_id: Mapped[str | None] = mapped_column(String, nullable=True)
     external_fill_id: Mapped[str | None] = mapped_column(String, nullable=True)

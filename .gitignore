@@ -21,3 +21,6 @@ env/
 
 # Migrations bytecode
 migrations/**/__pycache__/
+
+# Runtime logs
+logs/

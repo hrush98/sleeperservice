@@ -18,13 +18,14 @@ logger = logging.getLogger("cli.live")
 
 
 @dataclass
-class MatchSnapshot:
+class FocusSnapshot:
     mapping_id: str
     league: str
     match: str
     start_time: datetime | None
     market_type: str | None
     game_number: int | None
+    tick_size: float | None
     pm_resolution_status: str
     pm_winner: str | None
     p_ref_a: float | None
@@ -37,24 +38,30 @@ class MatchSnapshot:
     ask_b: float | None
     mid_a: float | None
     mid_b: float | None
-    source_note: str
     edge: NetEdgeResult
     updated_at: datetime
-    ended: bool
-    is_live: bool
+    ws_connected: bool
+    last_odds_update: datetime | None
+    last_gamma_update: datetime | None
 
 
 @dataclass
-class LiveState:
-    snapshots: list[MatchSnapshot]
-    recently_ended: list[MatchSnapshot]
-    upcoming: list[MatchSnapshot]
-    focus_match: MatchSnapshot | None
-    focus_game1: MatchSnapshot | None
+class PositionRollup:
+    wins_count: int
+    wins_total_pnl_percent: float
+    wins_avg_pnl_percent: float
+    best_win_pnl_percent: float | None
+    last_closed_at: datetime | None
+    modes: set[str] = field(default_factory=set)
+
+
+@dataclass
+class MonitorState:
+    snapshot: FocusSnapshot | None
+    trade_tape: list[str]
     last_update: datetime | None
     last_loop_duration: float | None
     perf: "PerfStats" | None
-    ws_connected: bool | None
 
 
 @dataclass
@@ -78,7 +85,8 @@ class TriggerRecord:
     trigger: TriggerEvent
     ts: datetime
     logged: bool = False
-    entry_logged: bool = False
+    entry_checked_at: datetime | None = None
+    entry_done: bool = False
     catchup_logged_sides: set[str] = field(default_factory=set)
 
 
@@ -87,6 +95,7 @@ class PaperTrade:
     key: str
     mapping_id: str
     market_id: str
+    token_id: str | None
     market_type: str | None
     game_number: int | None
     side: str
@@ -102,6 +111,8 @@ class PaperTrade:
     p_ref_entry: float | None
     db_position_id: str | None = None
     status: str = "open"
+    external_order_id: str | None = None
+    external_status: str | None = None
 
 
 class LogBuffer:
@@ -114,8 +125,6 @@ class LogBuffer:
         self._lock = Lock()
 
     def add(self, message: str, key: str | None = None, cooldown_seconds: int = 0) -> None:
-        from datetime import timezone
-
         with self._lock:
             now = datetime.now(tz=timezone.utc)
             if key and cooldown_seconds > 0:

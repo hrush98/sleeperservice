@@ -18,20 +18,20 @@ This document explains the live monitor performance design: what we optimize for
 ### Schematic
 ```mermaid
 flowchart TD
-  cliLive[cli_live] --> monitor[EventDrivenMonitor]
-  monitor --> ws[PolymarketWSManager]
-  monitor --> oddsBatch["OddsPapi oddsByTournaments 1s"]
-  monitor --> oddsHot["OddsPapi odds hot 500ms"]
-  monitor --> gamma["Polymarket Gamma status TTL"]
+  cliLive[cli_live] --> poller[SingleMatchPoller]
+  cliLive --> trader[TradeManager]
+  poller --> ws[PolymarketWSManager]
+  poller --> oddsBatch["OddsPapi oddsByTournaments 1s"]
+  poller --> oddsHot["OddsPapi odds hot 500ms"]
+  poller --> gamma["Polymarket Gamma status TTL"]
   ws --> bookState[inMemoryBookState]
   oddsBatch --> oddsCache[inMemoryOddsCache]
   oddsHot --> oddsCache
-  oddsCache --> trigger[FixtureStateManager triggers]
-  trigger --> hotSet[hotFixtures]
+  oddsCache --> trigger[FixtureStateManager]
   bookState --> compare[edgeCompute]
   oddsCache --> compare
   compare --> tui[TUI_render]
-  compare --> tradeTape[paperTradeSignals]
+  compare --> tradeTape[tradeSignals]
 ```
 
 ### Techniques already in place

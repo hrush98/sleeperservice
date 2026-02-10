@@ -398,6 +398,7 @@ class OddsPapiClient:
             selection = player0.get("bookmakerOutcomeId")
             price = player0.get("price")
             changed_at = player0.get("changedAt")
+            player_id = player0.get("playerId")
 
             if selection in ("home", "away") and price is not None:
                 try:
@@ -407,6 +408,7 @@ class OddsPapiClient:
                         "price": price_float,
                         "implied_prob": implied_prob,
                         "changed_at": changed_at,
+                        "player_id": player_id,
                     }
                 except (ValueError, TypeError):
                     invalid = True
@@ -443,6 +445,7 @@ class OddsPapiClient:
             selection = str(player0.get("bookmakerOutcomeId") or "")
             price = player0.get("price")
             changed_at = player0.get("changedAt")
+            player_id = player0.get("playerId")
 
             if selection in required_home and price is not None:
                 try:
@@ -452,6 +455,7 @@ class OddsPapiClient:
                         "price": price_float,
                         "implied_prob": implied_prob,
                         "changed_at": changed_at,
+                        "player_id": player_id,
                     }
                 except (ValueError, TypeError):
                     return {}
@@ -463,6 +467,7 @@ class OddsPapiClient:
                         "price": price_float,
                         "implied_prob": implied_prob,
                         "changed_at": changed_at,
+                        "player_id": player_id,
                     }
                 except (ValueError, TypeError):
                     return {}
@@ -474,6 +479,7 @@ class OddsPapiClient:
                         "price": price_float,
                         "implied_prob": implied_prob,
                         "changed_at": changed_at,
+                        "player_id": player_id,
                     }
                 except (ValueError, TypeError):
                     return {}
@@ -503,7 +509,11 @@ class OddsPapiClient:
 
     @staticmethod
     def parse_fixture_status(status_id: int | None) -> str:
-        """Convert OddsPapi statusId to our status string."""
+        """Convert OddsPapi statusId to our status string.
+
+        NOTE: statusId is unreliable for some esports fixtures.
+        Prefer ``infer_fixture_status`` which also checks trueStartTime/trueEndTime.
+        """
         status_map = {
             0: "upcoming",  # Not started
             1: "live",  # Live
@@ -511,6 +521,47 @@ class OddsPapiClient:
             3: "cancelled",  # Cancelled
         }
         return status_map.get(status_id, "upcoming") if status_id is not None else "upcoming"
+
+    @staticmethod
+    def infer_fixture_status(payload: dict) -> str:
+        """Infer fixture status using trueStartTime/trueEndTime, falling back to statusId.
+
+        OddsPapi sometimes keeps statusId=0 even after a match has started.
+        The trueStartTime/trueEndTime fields are the authoritative signal.
+        """
+        status_id = payload.get("statusId")
+        true_start = payload.get("trueStartTime")
+        true_end = payload.get("trueEndTime")
+
+        # Explicit finished/cancelled via statusId takes priority
+        if status_id in (2, 3):
+            return "finished" if status_id == 2 else "cancelled"
+
+        # trueEndTime present → finished
+        if true_end:
+            return "finished"
+
+        # trueStartTime present, no end → live
+        if true_start:
+            return "live"
+
+        # Fall back to statusId
+        return OddsPapiClient.parse_fixture_status(status_id)
+
+    @staticmethod
+    def is_inplay_from_payload(payload: dict) -> bool:
+        """Return True if the payload indicates the fixture is currently in-play.
+
+        Uses trueStartTime/trueEndTime as the primary signal.
+        trueEndTime being set always means the match is over, even if statusId lags.
+        """
+        true_end = payload.get("trueEndTime")
+        if true_end:
+            return False
+        true_start = payload.get("trueStartTime")
+        if true_start:
+            return True
+        return payload.get("statusId") == 1
 
 
 class AsyncCooldownTracker:

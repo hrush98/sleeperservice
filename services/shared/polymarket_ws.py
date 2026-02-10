@@ -16,7 +16,6 @@ import websockets
 from websockets.exceptions import ConnectionClosed, ConnectionClosedOK, ConnectionClosedError
 
 from shared.config import settings
-from shared.agent_debug import agent_log
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +60,9 @@ class PolymarketWSManager:
         self._stop: asyncio.Event | None = None
         self._ws: websockets.WebSocketClientProtocol | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._has_subscribed = False
+        self._last_message_ts: datetime | None = None
+        self._message_count: int = 0
 
     async def get_state_snapshot(self) -> dict[str, BookState]:
         """Return a shallow copy of current book state."""
@@ -135,10 +137,11 @@ class PolymarketWSManager:
             logger.info("Polymarket WS connected")
             self._ws = ws
             self._loop = asyncio.get_running_loop()
+            self._has_subscribed = False
             
             # CRITICAL: Must send subscribe BEFORE any pings - server closes otherwise
             try:
-                await self._send_subscribe(ws)
+                await self._send_subscribe(ws, reason="connect")
             except Exception as e:
                 logger.error("WS subscribe failed: %s", e)
                 raise
@@ -163,18 +166,38 @@ class PolymarketWSManager:
                 self._ws = None
             logger.info("Polymarket WS disconnected")
 
-    async def _send_subscribe(self, ws: websockets.WebSocketClientProtocol) -> None:
+    async def _send_subscribe(
+        self,
+        ws: websockets.WebSocketClientProtocol,
+        *,
+        force: bool = False,
+        reason: str = "update",
+    ) -> None:
         async with self._lock:
             assets_ids = list(self._assets_ids)
+            if not assets_ids:
+                return
             # Always send subscription message - server requires it before accepting pings
-            if assets_ids and set(assets_ids) == self._subscribed_assets:
+            if (not force) and assets_ids and set(assets_ids) == self._subscribed_assets:
                 return  # Already subscribed to these exact assets
             self._subscribed_assets = set(assets_ids)
-        payload = {"assets_ids": assets_ids, "type": "market"}
+        if reason == "connect" and not self._has_subscribed:
+            payload = {"assets_ids": assets_ids, "type": "market"}
+        else:
+            payload = {"assets_ids": assets_ids, "operation": "subscribe"}
         await ws.send(json.dumps(payload))
         logger.info("WS subscribed to %d assets", len(assets_ids))
+        self._has_subscribed = True
+
+    async def force_resubscribe(self) -> None:
+        ws = self._ws
+        if not ws:
+            return
+        await self._send_subscribe(ws, force=True, reason="force")
 
     async def _ping_loop(self, ws: websockets.WebSocketClientProtocol) -> None:
+        while not self._stop.is_set() and not self._has_subscribed:
+            await asyncio.sleep(0.1)
         # Wait before first ping to give recv loop time to start
         await asyncio.sleep(self._ping_interval)
         while not self._stop.is_set():
@@ -218,18 +241,8 @@ class PolymarketWSManager:
         """Handle a single decoded WS event payload."""
 
         event_type = str(payload.get("event_type") or "").lower()
-        # region agent log (WS event routing)
-        agent_log(
-            location="services/shared/polymarket_ws.py:_handle_payload_dict",
-            message="ws payload dict received",
-            hypothesis_id="H1",
-            data={
-                "event_type": event_type,
-                "has_type": "type" in payload,
-                "keys": list(payload.keys())[:8],
-            },
-        )
-        # endregion
+        self._last_message_ts = datetime.now(tz=timezone.utc)
+        self._message_count += 1
         if event_type == "book":
             await self._handle_book(payload)
         elif event_type == "price_change":
@@ -263,20 +276,6 @@ class PolymarketWSManager:
         )
         async with self._state_lock:
             self._book_state[asset_id] = book
-        # region agent log (book updates)
-        agent_log(
-            location="services/shared/polymarket_ws.py:_handle_book",
-            message="book updated",
-            hypothesis_id="H1",
-            data={
-                "asset_id": asset_id,
-                "best_bid": best_bid,
-                "best_ask": best_ask,
-                "bids_n": len(bids),
-                "asks_n": len(asks),
-            },
-        )
-        # endregion
 
     async def _handle_price_change(self, payload: dict[str, Any]) -> None:
         changes = payload.get("price_changes") or []
@@ -311,14 +310,6 @@ class PolymarketWSManager:
             book.timestamp = timestamp
             async with self._state_lock:
                 self._book_state[asset_id] = book
-            # region agent log (price change updates)
-            agent_log(
-                location="services/shared/polymarket_ws.py:_handle_price_change",
-                message="price_change applied",
-                hypothesis_id="H1",
-                data={"asset_id": asset_id, "best_bid": best_bid, "best_ask": best_ask},
-            )
-            # endregion
 
     async def _handle_last_trade_price(self, payload: dict[str, Any]) -> None:
         asset_id = str(payload.get("asset_id") or "")
@@ -345,6 +336,9 @@ class PolymarketWSManager:
                 parsed.append((price, size))
         parsed.sort(key=lambda item: item[0], reverse=descending)
         return parsed
+
+    def get_message_stats(self) -> tuple[datetime | None, int]:
+        return self._last_message_ts, self._message_count
 
     @staticmethod
     def _parse_timestamp(value: Any) -> datetime:

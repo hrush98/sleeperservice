@@ -14,10 +14,11 @@ from shared.config import settings
 @dataclass
 class TriggerEvent:
     fixture_id: str
-    trigger_type: str  # primary | burst | adaptive | lock_change
+    trigger_type: str  # primary | burst | adaptive | lock_change | edge_persist
     delta_p_ref_a: float | None
     delta_p_ref_b: float | None
     urgency: str  # normal | high
+    best_edge: float | None = None
 
 
 @dataclass
@@ -33,6 +34,8 @@ class FixtureState:
     locked: bool
     pending_sign: int | None
     pending_count: int
+    edge_above_count: int = 0
+    edge_above_side: str | None = None
 
 
 class TriggerConfig:
@@ -45,6 +48,9 @@ class TriggerConfig:
     HOT_TTL_BURST_SECONDS = 90
     EWMA_ALPHA = 0.3
     HISTORY_MAXLEN = 240
+    EDGE_PERSIST_THRESHOLD = settings.trigger_edge_persist_threshold
+    EDGE_PERSIST_POLLS = settings.trigger_edge_persist_polls
+    EDGE_SPIKE_THRESHOLD = settings.trigger_edge_spike_threshold
 
 
 class FixtureStateManager:
@@ -151,6 +157,63 @@ class FixtureStateManager:
         else:
             state.pending_sign = None
             state.pending_count = 0
+
+        return None
+
+    def check_edge_spike(
+        self,
+        fixture_id: str,
+        best_edge: float | None,
+        best_side: str | None,
+        now: datetime | None = None,
+    ) -> TriggerEvent | None:
+        """Fire immediately when absolute edge exceeds spike threshold (single poll)."""
+        if best_edge is not None and best_edge >= TriggerConfig.EDGE_SPIKE_THRESHOLD:
+            now = now or datetime.now(tz=timezone.utc)
+            self.escalate_to_hot(fixture_id, TriggerConfig.HOT_TTL_BURST_SECONDS, now)
+            return TriggerEvent(
+                fixture_id=fixture_id,
+                trigger_type="edge_spike",
+                delta_p_ref_a=None,
+                delta_p_ref_b=None,
+                urgency="high",
+                best_edge=best_edge,
+            )
+        return None
+
+    def check_edge_trigger(
+        self,
+        fixture_id: str,
+        best_edge: float | None,
+        best_side: str | None,
+        now: datetime | None = None,
+    ) -> TriggerEvent | None:
+        """Fire trigger when absolute edge stays above threshold for N consecutive polls."""
+        now = now or datetime.now(tz=timezone.utc)
+        state = self.get_state(fixture_id)
+
+        if best_edge is not None and best_edge >= TriggerConfig.EDGE_PERSIST_THRESHOLD:
+            if state.edge_above_side == best_side:
+                state.edge_above_count += 1
+            else:
+                state.edge_above_side = best_side
+                state.edge_above_count = 1
+
+            if state.edge_above_count >= TriggerConfig.EDGE_PERSIST_POLLS:
+                state.edge_above_count = 0
+                state.edge_above_side = None
+                self.escalate_to_hot(fixture_id, TriggerConfig.HOT_TTL_SECONDS, now)
+                return TriggerEvent(
+                    fixture_id=fixture_id,
+                    trigger_type="edge_persist",
+                    delta_p_ref_a=None,
+                    delta_p_ref_b=None,
+                    urgency="normal",
+                    best_edge=best_edge,
+                )
+        else:
+            state.edge_above_count = 0
+            state.edge_above_side = None
 
         return None
 

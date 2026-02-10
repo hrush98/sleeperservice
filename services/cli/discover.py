@@ -13,6 +13,7 @@ from uuid import uuid4
 import typer
 from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
+from zoneinfo import ZoneInfo
 
 from shared.config import settings
 from shared.db import SessionLocal
@@ -25,6 +26,24 @@ logger = logging.getLogger(__name__)
 # Target leagues (normalized names for matching)
 TARGET_LEAGUE_PATTERNS = settings.target_league_patterns
 TEAM_SUFFIXES = {"esports", "e-sports", "gaming", "team"}
+
+
+def _format_display_time(dt: datetime | None) -> str:
+    """
+    Render a timestamp for humans.
+
+    We always store UTC in the DB; this converts for display only.
+    """
+    if not dt:
+        return "TBD"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    tz_name = (getattr(settings, "display_timezone", None) or "UTC").strip()
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = timezone.utc
+    return dt.astimezone(tz).strftime("%b %d %H:%M %Z")
 
 
 def normalize_name(name: str) -> str:
@@ -223,7 +242,7 @@ def discover_command(days: int, dry_run: bool = False, include_past: bool = Fals
                     "team_a_name": f.get("participant1Name"),
                     "team_b_name": f.get("participant2Name"),
                     "start_time": _parse_datetime(f.get("startTime")),
-                    "status": OddsPapiClient.parse_fixture_status(f.get("statusId")),
+                    "status": OddsPapiClient.infer_fixture_status(f),
                     "has_odds": bool(f.get("hasOdds")),
                     "raw_json": f,
                 }
@@ -707,15 +726,9 @@ def _print_mapping_overview(window_start: datetime, include_past: bool) -> None:
         )
 
         for m in sorted_mappings:
-            # Format times (UTC for consistency)
-            if m["start_time"]:
-                op_time_str = m["start_time"].strftime("%b %d %H:%M UTC")
-            else:
-                op_time_str = "TBD"
-            if m.get("pm_start_time"):
-                pm_time_str = m["pm_start_time"].strftime("%b %d %H:%M UTC")
-            else:
-                pm_time_str = "TBD"
+            # Display times in configured local timezone (DB/storage remains UTC)
+            op_time_str = _format_display_time(m.get("start_time"))
+            pm_time_str = _format_display_time(m.get("pm_start_time"))
 
             # Confidence indicator with color
             conf_pct = int(m["confidence"] * 100)
