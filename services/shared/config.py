@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     oddspapi_base_url: str = "https://api.oddspapi.io"
     odds_api_key: str | None = None
     oddspapi_lol_sport_id: int = 18  # LoL sportId in OddsPapi
+    oddspapi_cs2_sport_id: int = 17  # CS2 sportId in OddsPapi
 
     # Polymarket
     polymarket_base_url: str = "https://gamma-api.polymarket.com"
@@ -54,6 +55,7 @@ class Settings(BaseSettings):
 
     # Target leagues (comma-separated)
     target_leagues: str = "LCK,LPL,LEC,LCS,LTA,LCP,CBLOL,LFL"
+    target_cs2_leagues: str = "BLAST Premier Series,ESL Pro League,Intel Extreme Masters,PGL"
 
     # Cooldowns (milliseconds) - OddsPapi rate limits
     # Discovery can be slower; live odds should be fast.
@@ -77,6 +79,10 @@ class Settings(BaseSettings):
     # This guards against thin-book transient prints by requiring BOTH extremes.
     pm_done_threshold_high: float = 0.995
     pm_done_threshold_low: float = 0.01
+
+    # Discovery lookback (hours) — include matches that started this many
+    # hours ago so in-play fixtures get discovered and mapped.
+    discovery_lookback_hours: float = 6.0
 
     # OddsPapi league poll cadence (seconds)
     oddspapi_league_poll_seconds_pre: float = 5.0
@@ -113,12 +119,12 @@ class Settings(BaseSettings):
     entry_reeval_seconds: float = 3.0
 
     # Live trading safeguards (only used in live mode)
-    live_max_usd_per_order: float = 2.0
-    live_max_shares_per_order: float = 100.0
+    live_max_usd_per_order: float = 10.0
+    live_max_shares_per_order: float = 1000.0
     live_max_open_positions: int = 5
     live_min_seconds_between_orders: float = 3.0
     live_share_step: float = 0.0001
-    min_book_depth_usd: float = 50.0  # Skip entry when bid-side USD depth is below this
+    min_book_depth_usd: float = 250.0  # Skip entry when bid-side USD depth is below this
     live_kill_switch_path: str = "~/.sleeprservice/keys/STOP_TRADING"
     live_require_allowance_check: bool = True
     # Stop-loss guards
@@ -167,8 +173,23 @@ class Settings(BaseSettings):
     @property
     def target_league_patterns(self) -> list[str]:
         """Return normalized league patterns for keyword matching."""
+        return self._normalized_patterns(self.target_league_list)
+
+    @property
+    def target_cs2_league_list(self) -> list[str]:
+        """Return target CS2 leagues as a list."""
+        return [league.strip().upper() for league in self.target_cs2_leagues.split(",")]
+
+    @property
+    def target_cs2_league_patterns(self) -> list[str]:
+        """Return normalized CS2 league patterns for keyword matching."""
+        return self._normalized_patterns(self.target_cs2_league_list)
+
+    @staticmethod
+    def _normalized_patterns(leagues: list[str]) -> list[str]:
+        """Normalize league names into robust keyword patterns."""
         patterns: list[str] = []
-        for league in self.target_league_list:
+        for league in leagues:
             normalized = "".join(
                 ch.lower() if ch.isalnum() or ch.isspace() else " " for ch in league
             )

@@ -32,6 +32,7 @@ class League(Base):
     id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
     source: Mapped[str] = mapped_column(String, nullable=False)  # "oddspapi" | "polymarket"
     source_id: Mapped[str] = mapped_column(String, nullable=False)  # tournament_id or series_id
+    sport: Mapped[str | None] = mapped_column(String, nullable=True)  # "lol" | "cs2"
     name: Mapped[str] = mapped_column(String, nullable=False)
     slug: Mapped[str | None] = mapped_column(String, nullable=True)
     raw_json: Mapped[dict] = mapped_column(JSONB, nullable=False)

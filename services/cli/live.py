@@ -327,7 +327,7 @@ def _prompt_match_selection(
                 .join(op_fixture, Mapping.oddspapi_fixture_id == op_fixture.id)
                 .join(pm_fixture, Mapping.polymarket_fixture_id == pm_fixture.id)
                 .where(op_fixture.start_time.is_not(None))
-                .where(op_fixture.start_time >= now - timedelta(hours=5))
+                .where(op_fixture.start_time >= now - timedelta(hours=settings.discovery_lookback_hours))
                 .where(op_fixture.status != "finished")
                 .order_by(op_fixture.start_time.asc())
                 .limit(limit)
@@ -351,7 +351,7 @@ def _prompt_match_selection(
             seen_op_ids[op_id] = len(unique_rows)
             unique_rows.append((mapping, op_fix, pm_fix))
 
-        display_rows: list[tuple[int, Mapping, Fixture, Fixture, str]] = []
+        display_rows: list[tuple[int, Mapping, Fixture, Fixture, str, str]] = []
         for idx, (mapping, op_fix, pm_fix) in enumerate(unique_rows, start=1):
             league_name = op_fix.league.name if op_fix.league else ""
             teams = f"{op_fix.team_a_name} vs {op_fix.team_b_name}"
@@ -360,13 +360,30 @@ def _prompt_match_selection(
                 if op_fix.start_time
                 else "--"
             )
-            label = f"{league_name} {teams} ({start_str} UTC)".strip()
-            display_rows.append((idx, mapping, op_fix, pm_fix, label))
+            # Tag matches that have already started
+            live_tag = ""
+            if op_fix.start_time and op_fix.start_time <= now:
+                live_tag = " [LIVE]"
+            label = f"{league_name} {teams} ({start_str} UTC){live_tag}".strip()
+            sport = _fixture_sport_label(op_fix)
+            display_rows.append((idx, mapping, op_fix, pm_fix, label, sport))
 
     typer.echo("")
     typer.echo("Select match (next mapped).")
-    for idx, _, _, _, label in display_rows:
-        typer.echo(f"  {idx}. {label}")
+    grouped = {"LoL": [], "CS2": [], "Other": []}
+    for row in display_rows:
+        sport = row[5]
+        if sport in grouped:
+            grouped[sport].append(row)
+        else:
+            grouped["Other"].append(row)
+    for sport in ("LoL", "CS2", "Other"):
+        rows_for_sport = grouped[sport]
+        if not rows_for_sport:
+            continue
+        typer.echo(f"  -- {sport} --")
+        for idx, _, _, _, label, _ in rows_for_sport:
+            typer.echo(f"  {idx}. {label}")
     while True:
         response = typer.prompt(f"Match [1-{len(display_rows)}]", default="", show_default=False)
         response = response.strip()
@@ -393,6 +410,20 @@ def _prompt_match_selection(
         )
         league_name = op_fix.league.name if op_fix.league else ""
         return mapping, op_fix, pm_fixtures, league_name
+
+
+def _fixture_sport_label(fixture: Fixture) -> str:
+    league = fixture.league
+    sport_code = (getattr(league, "sport", None) or "").lower()
+    if sport_code == "lol":
+        return "LoL"
+    if sport_code == "cs2":
+        return "CS2"
+    league_name = (league.name if league else "") or ""
+    normalized = league_name.lower()
+    if "cs2" in normalized or "counter strike" in normalized:
+        return "CS2"
+    return "LoL" if "lol" in normalized else "Other"
 
 
 def _get_completed_positions_for_mapping(mapping_id: str, limit: int) -> list:

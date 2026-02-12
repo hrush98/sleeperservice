@@ -1,15 +1,15 @@
-# LoL Lead–Lag Arbitrage Bot
+# LoL + CS2 Lead–Lag Arbitrage Bot
 Master project plan (v2 — simplified MVP)
 
 ## Vision
-Detect and exploit short-lived **lead–lag** inefficiencies between Pinnacle odds (via OddsPapi) and Polymarket LoL CLOB markets. Start with paper trading; gate live execution on measured edge.
+Detect and exploit short-lived **lead–lag** inefficiencies between Pinnacle odds (via OddsPapi) and Polymarket CLOB sports markets (currently LoL + CS2). Start with paper trading; gate live execution on measured edge.
 
 ## Core insight
 Pinnacle reprices faster than Polymarket. When Pinnacle moves, there's a brief window where Polymarket is stale. We detect that window, measure it, and (later) trade it.
 
 ## Design principles (MVP)
 - **Two separate modes**: Discovery (on-demand CLI) vs Live Monitor (runs during matches)
-- **No broad discovery**: Only ingest LoL matches from top 6 leagues
+- **No broad discovery**: Only ingest LoL + CS2 from selected target leagues
 - **Minimal storage**: Only what's needed for mapping + live comparison
 - **Clear observability**: Know exactly what's happening at each step
 
@@ -21,15 +21,15 @@ Pinnacle reprices faster than Polymarket. When Pinnacle moves, there's a brief w
 Run manually to collect upcoming matches for the next N days. Not always running.
 
 **OddsPapi flow:**
-1. `GET /v4/tournaments?sportId=18` → get tournament IDs for LCK, LPL, LEC, LCS/LTA, LCP, CBLOL
-2. `GET /v4/participants?sportId=18` → cache team ID → name mappings
+1. `GET /v4/tournaments?sportId=18` (LoL) + `GET /v4/tournaments?sportId=17` (CS2) → target leagues
+2. `GET /v4/participants?sportId=18/17` → cache team ID → name mappings
 3. `GET /v4/fixtures?tournamentId=X&from=...&to=...&hasOdds=true` → get upcoming fixtures
 4. Store: leagues, teams, fixtures
 
 **Polymarket flow:**
-1. `GET /sports` → find `sport="lol"` entry (series=10311). Note: "lcs" = soccer Leagues Cup, "lpl" = cricket!
-2. `GET /teams?league=lol` → cache team mappings
-3. `GET /events?series_id=10311&tag_id=100639&closed=false` → get open (unresolved) LoL events
+1. `GET /sports` → find `sport="lol"` (series=10311) and `sport="cs2"` (series=10310)
+2. `GET /teams?league=lol` and `GET /teams?league=counter-strike` → cache team mappings
+3. `GET /events?series_id=...&tag_id=100639&closed=false` → get open (unresolved) LoL/CS2 events
 4. Store: leagues, teams, events/markets
    - Store an **event fixture** (match-level parent) with league, teams, start time
      - Event start time is derived from the moneyline market `gameStartTime` when present
@@ -76,15 +76,20 @@ Runs when a mapped match goes live. The operator picks the match up front; the m
 
 ---
 
-## Target leagues (top 6 LoL)
+## Target leagues
 - **LCK** (South Korea) — strongest region
 - **LPL** (China) — strongest region
 - **LEC** (Europe)
 - **LCS/LTA** (North America)
 - **LCP** (Asia-Pacific)
 - **CBLOL** (Brazil)
+- **BLAST Premier Series** (CS2 Tier 1)
+- **ESL Pro League** (CS2 Tier 1)
+- **Intel Extreme Masters** (CS2 Tier 1)
+- **PGL** (CS2 Tier 1)
 
-OddsPapi sportId for LoL: **18**
+OddsPapi sportId for LoL: **18**  
+OddsPapi sportId for CS2: **17**
 
 ---
 
@@ -299,7 +304,7 @@ curl http://localhost:8000/ops/status
 ---
 
 ## What we're NOT doing (MVP scope control)
-- No broad market discovery (only LoL top 6 leagues)
+- No broad market discovery (only selected LoL + CS2 leagues)
 - No always-running worker polling everything
 - No complex settlement specs or quote snapshots for non-live matches
 - No UI

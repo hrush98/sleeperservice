@@ -29,6 +29,44 @@ The "candidate" abstraction is too broad. You load every mapped match within a t
 The UI is coupled to the polling logic. The snapshot loop builds UI state AND processes trade signals in the same iteration, so a UI display bug (wrong bucket) can interact with trading logic, and vice versa.
 Rich Live + stdin is fragile. Rich's Live context redraws the entire screen every tick. Reading from stdin while that's happening is fundamentally awkward in a terminal.
 
+## 2026-02-11 — CS2 discovery + live selection support
+
+### What changed
+- Added CS2 config support in `services/shared/config.py` (`oddspapi_cs2_sport_id`, `target_cs2_leagues`, derived CS2 league pattern properties).
+- Extended discovery in `services/cli/discover.py` to ingest both LoL and CS2 from OddsPapi + Polymarket in one run, while printing grouped sections (LoL first, CS2 second).
+- Added `sport` column to `leagues` model/schema (`services/shared/models.py`, migration `0011_add_league_sport.py`) with backfill of existing rows to `lol`.
+- Updated live match selector in `services/cli/live.py` to show grouped choices by sport and keep shared selection/trading flow unchanged.
+- Updated docs (`docs/project-plan.md`, `docs/architecture.md`) to reflect LoL+CS2 scope.
+
+### Design decisions
+- Keep existing fixture/mapping/trader pipeline sport-agnostic; only add sport-aware ingestion and display layers.
+- Store sport at `leagues` level to avoid brittle string parsing for UI grouping/filtering.
+- Reuse Polymarket game-bets tag and existing market classification (`match_winner`/`game_winner`) across both sports.
+
+### Why
+LoL-only discovery had sparse scheduling windows. CS2 adds more available matches (including Tier-1 tournaments) without requiring a new trading engine path.
+
+### Impact
+- Discovery now writes and reports LoL + CS2 in the same run.
+- Live selection prompt now shows LoL and CS2 sections together.
+- New migration required: `0011_add_league_sport`.
+
+### How to verify
+- `conda run -n poly env PYTHONPATH=./services alembic upgrade head` -> migration applies successfully.
+- `conda run -n poly env PYTHONPATH=./services python -m cli discover --days 7 --dry-run` -> output includes separate LoL and CS2 sections.
+- `conda run -n poly env PYTHONPATH=./services python -m cli live` -> selection list shows grouped LoL and CS2 entries.
+
+```mermaid
+flowchart TD
+  discoverCmd[discover_command] --> lolFlow[LoL_ingest]
+  discoverCmd --> cs2Flow[CS2_ingest]
+  lolFlow --> leaguesTable[leagues_sport_aware]
+  cs2Flow --> leaguesTable
+  leaguesTable --> mappingsTable[mappings]
+  mappingsTable --> livePrompt[live_match_selection_grouped]
+  livePrompt --> poller[SingleMatchPoller]
+```
+
 ## 2026-02-11 — Exit Execution Overhaul: GTC + Reprice + Balance Reconcile
 
 ### What changed

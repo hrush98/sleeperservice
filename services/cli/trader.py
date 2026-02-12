@@ -81,6 +81,7 @@ class TradeManager:
         self._trade_buffer = trade_buffer
         self._open_trades: dict[str, PaperTrade] = {}
         self._open_trades_lock = Lock()
+        self._latest_snapshots: dict[str, FocusSnapshot] = {}
         self._triggers: dict[str, TriggerRecord] = {}
         self._run_id = uuid4()
         self._mode_label = "real" if trade_mode == "live" else "paper"
@@ -266,6 +267,22 @@ class TradeManager:
                 return pm_fix
         return self._pm_fixture  # fallback to primary
 
+    @staticmethod
+    def _snapshot_cache_key(pm_fixture: Fixture) -> str:
+        return str(pm_fixture.id)
+
+    def _snapshot_for_trade(
+        self,
+        *,
+        pm_fixture: Fixture,
+        trade: PaperTrade,
+        now: datetime,
+    ) -> FocusSnapshot:
+        cached = self._latest_snapshots.get(self._snapshot_cache_key(pm_fixture))
+        if cached is not None:
+            return cached
+        return self._build_stub_snapshot(trade, now)
+
     def _reconcile_open_trade_balances(self, now: datetime) -> None:
         if self._trade_mode != "live" or not self._executor:
             return
@@ -296,7 +313,11 @@ class TradeManager:
                     ),
                     self._pm_fixture,
                 )
-                snapshot = self._build_stub_snapshot(trade, now)
+                snapshot = self._snapshot_for_trade(
+                    pm_fixture=pm_fixture,
+                    trade=trade,
+                    now=now,
+                )
                 if balance <= eps:
                     position.closed_at = now
                     position.status = "closed"
@@ -384,7 +405,11 @@ class TradeManager:
                     continue
                 if balance is None:
                     continue
-                snapshot = self._build_stub_snapshot(trade, now)
+                snapshot = self._snapshot_for_trade(
+                    pm_fixture=pm_fixture,
+                    trade=trade,
+                    now=now,
+                )
                 if balance <= eps:
                     position.closed_at = now
                     position.status = "closed"
@@ -506,6 +531,7 @@ class TradeManager:
                     pm_fix = self._pm_fixture_for_snapshot(snap)
                     if not pm_fix:
                         continue
+                    self._latest_snapshots[self._snapshot_cache_key(pm_fix)] = snap
                     tkey = _trigger_key(fixture_id, snap)
                     ended = _is_market_ended(snap)
                     await self._process_trade_signals(
@@ -1915,6 +1941,9 @@ class TradeManager:
                     if not degraded_chunk_mode
                     else f"@ {limit_price:.3f} chunk={sell_shares:.2f}"
                 ),
+                position_id=trade.db_position_id,
+                quantity=sell_shares,
+                limit_price=limit_price,
                 external_order_id=response.order_id,
                 external_status=response.status,
                 raw_json={
@@ -2092,7 +2121,11 @@ class TradeManager:
         now: datetime,
         pm_fixture: Fixture,
     ) -> None:
-        snapshot = self._build_stub_snapshot(trade, now)
+        snapshot = self._snapshot_for_trade(
+            pm_fixture=pm_fixture,
+            trade=trade,
+            now=now,
+        )
         attempt.last_checked_at = now
         eps = max(float(getattr(settings, "live_share_step", 0.0001) or 0.0001), 0.000001)
         requested = float(attempt.requested_size or trade.quantity or 0.0)

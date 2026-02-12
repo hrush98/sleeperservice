@@ -6,6 +6,7 @@ then builds mappings between them.
 """
 
 import logging
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from uuid import uuid4
@@ -24,8 +25,39 @@ from shared.polymarket_client import PolymarketClient
 logger = logging.getLogger(__name__)
 
 # Target leagues (normalized names for matching)
-TARGET_LEAGUE_PATTERNS = settings.target_league_patterns
+LOL_TARGET_LEAGUE_PATTERNS = settings.target_league_patterns
+CS2_TARGET_LEAGUE_PATTERNS = settings.target_cs2_league_patterns
+ALL_TARGET_LEAGUE_PATTERNS = list(
+    dict.fromkeys([*LOL_TARGET_LEAGUE_PATTERNS, *CS2_TARGET_LEAGUE_PATTERNS])
+)
 TEAM_SUFFIXES = {"esports", "e-sports", "gaming", "team"}
+
+
+@dataclass(frozen=True)
+class SportConfig:
+    display_name: str
+    sport_code: str
+    oddspapi_sport_id: int
+    oddspapi_league_patterns: list[str]
+    polymarket_team_league: str
+
+
+SPORT_CONFIGS: tuple[SportConfig, ...] = (
+    SportConfig(
+        display_name="LoL",
+        sport_code="lol",
+        oddspapi_sport_id=settings.oddspapi_lol_sport_id,
+        oddspapi_league_patterns=LOL_TARGET_LEAGUE_PATTERNS,
+        polymarket_team_league="lol",
+    ),
+    SportConfig(
+        display_name="CS2",
+        sport_code="cs2",
+        oddspapi_sport_id=settings.oddspapi_cs2_sport_id,
+        oddspapi_league_patterns=CS2_TARGET_LEAGUE_PATTERNS,
+        polymarket_team_league="counter-strike",
+    ),
+)
 
 
 def _format_display_time(dt: datetime | None) -> str:
@@ -53,10 +85,10 @@ def normalize_name(name: str) -> str:
     return " ".join(tokens)
 
 
-def is_target_league(name: str) -> bool:
+def is_target_league(name: str, patterns: list[str]) -> bool:
     """Check if a league name matches our target leagues."""
     normalized = normalize_name(name)
-    return any(pattern in normalized for pattern in TARGET_LEAGUE_PATTERNS)
+    return any(pattern in normalized for pattern in patterns)
 
 
 def similarity(a: str, b: str) -> float:
@@ -78,7 +110,7 @@ def _extract_polymarket_league(market: dict) -> str | None:
         if not value:
             continue
         normalized = normalize_name(str(value))
-        for pattern in TARGET_LEAGUE_PATTERNS:
+        for pattern in ALL_TARGET_LEAGUE_PATTERNS:
             if pattern in normalized:
                 return pattern
     return None
@@ -114,7 +146,7 @@ def _extract_oddspapi_league(fixture: Fixture) -> str | None:
     if not league_name:
         return None
     normalized = normalize_name(str(league_name))
-    for pattern in TARGET_LEAGUE_PATTERNS:
+    for pattern in ALL_TARGET_LEAGUE_PATTERNS:
         if pattern in normalized:
             return pattern
     return None
@@ -136,15 +168,12 @@ def discover_command(days: int, dry_run: bool = False, include_past: bool = Fals
     4. Fetch Polymarket events/markets → store
     5. Build mappings by matching league + teams + date
     """
-    typer.echo(f"\n🔍 Discovering LoL matches for next {days} days...\n")
+    typer.echo(f"\n🔍 Discovering LoL + CS2 matches for next {days} days...\n")
 
-    oddspapi = OddsPapiClient(
-        global_cooldown_ms=settings.oddspapi_global_cooldown_ms_discovery
-    )
     polymarket = PolymarketClient()
 
     now = datetime.now(tz=timezone.utc)
-    from_date = now
+    from_date = now - timedelta(hours=settings.discovery_lookback_hours)
     to_date = now + timedelta(days=days)
 
     stats = {
@@ -154,189 +183,214 @@ def discover_command(days: int, dry_run: bool = False, include_past: bool = Fals
         "teams_polymarket": 0,
         "fixtures_oddspapi": 0,
         "fixtures_polymarket": 0,
+        "leagues_oddspapi_by_sport": {cfg.sport_code: 0 for cfg in SPORT_CONFIGS},
+        "leagues_polymarket_by_sport": {cfg.sport_code: 0 for cfg in SPORT_CONFIGS},
+        "teams_oddspapi_by_sport": {cfg.sport_code: 0 for cfg in SPORT_CONFIGS},
+        "teams_polymarket_by_sport": {cfg.sport_code: 0 for cfg in SPORT_CONFIGS},
+        "fixtures_oddspapi_by_sport": {cfg.sport_code: 0 for cfg in SPORT_CONFIGS},
+        "fixtures_polymarket_by_sport": {cfg.sport_code: 0 for cfg in SPORT_CONFIGS},
         "mappings_created": 0,
         "mappings_high_confidence": 0,
     }
 
     with SessionLocal() as db:
-        # ============================================
-        # Step 1: OddsPapi Tournaments → Leagues
-        # ============================================
-        typer.echo("📋 Fetching OddsPapi tournaments...")
-        tournaments = oddspapi.get_tournaments()
-
-        target_tournaments = []
-        for t in tournaments:
-            name = t.get("tournamentName", "")
-            if is_target_league(name):
-                target_tournaments.append(t)
-                logger.info("Target league found: %s (id=%s)", name, t.get("tournamentId"))
-
-        typer.echo(f"   Found {len(target_tournaments)} target leagues from {len(tournaments)} total")
-
-        if not dry_run:
-            for t in target_tournaments:
-                stmt = insert(League).values(
-                    id=uuid4(),
-                    source="oddspapi",
-                    source_id=str(t.get("tournamentId")),
-                    name=t.get("tournamentName", "Unknown"),
-                    slug=t.get("tournamentSlug"),
-                    raw_json=t,
-                ).on_conflict_do_update(
-                    index_elements=["source", "source_id"],
-                    set_={"name": t.get("tournamentName"), "raw_json": t},
-                )
-                db.execute(stmt)
-            db.commit()
-
-        stats["leagues_oddspapi"] = len(target_tournaments)
-
-        # ============================================
-        # Step 2: OddsPapi Participants → Teams
-        # ============================================
-        typer.echo("\n👥 Fetching OddsPapi participants...")
-        participants = oddspapi.get_participants()
-        typer.echo(f"   Found {len(participants)} teams")
-
-        if not dry_run and participants:
-            for pid, pname in participants.items():
-                stmt = insert(Team).values(
-                    id=uuid4(),
-                    source="oddspapi",
-                    source_id=str(pid),
-                    name=pname,
-                    raw_json={"participantId": pid, "name": pname},
-                ).on_conflict_do_update(
-                    index_elements=["source", "source_id"],
-                    set_={"name": pname},
-                )
-                db.execute(stmt)
-            db.commit()
-
-        stats["teams_oddspapi"] = len(participants)
-
-        # ============================================
-        # Step 3: OddsPapi Fixtures for each league
-        # ============================================
-        typer.echo("\n🎮 Fetching OddsPapi fixtures...")
-
         oddspapi_fixtures = []
-        for t in target_tournaments:
-            tid = t.get("tournamentId")
-            tname = t.get("tournamentName", "Unknown")
+        for sport_cfg in SPORT_CONFIGS:
+            typer.echo(f"\n📋 Fetching OddsPapi tournaments ({sport_cfg.display_name})...")
+            oddspapi = OddsPapiClient(
+                global_cooldown_ms=settings.oddspapi_global_cooldown_ms_discovery,
+                sport_id=sport_cfg.oddspapi_sport_id,
+            )
+            tournaments = oddspapi.get_tournaments()
+            target_tournaments = []
+            for t in tournaments:
+                name = t.get("tournamentName", "")
+                if is_target_league(name, sport_cfg.oddspapi_league_patterns):
+                    target_tournaments.append(t)
+                    logger.info(
+                        "Target league found (%s): %s (id=%s)",
+                        sport_cfg.display_name,
+                        name,
+                        t.get("tournamentId"),
+                    )
 
-            # Get league from DB
-            league = db.execute(
-                select(League).where(League.source == "oddspapi", League.source_id == str(tid))
-            ).scalar_one_or_none()
+            stats["leagues_oddspapi_by_sport"][sport_cfg.sport_code] = len(target_tournaments)
+            stats["leagues_oddspapi"] += len(target_tournaments)
+            typer.echo(
+                f"   {sport_cfg.display_name}: {len(target_tournaments)} target leagues from {len(tournaments)} total"
+            )
 
-            fixtures = oddspapi.get_fixtures(tid, from_date, to_date)
-            typer.echo(f"   {tname}: {len(fixtures)} fixtures")
-
-            for f in fixtures:
-                fixture_data = {
-                    "source": "oddspapi",
-                    "source_id": str(f.get("fixtureId")),
-                    "league_id": league.id if league else None,
-                    "team_a_name": f.get("participant1Name"),
-                    "team_b_name": f.get("participant2Name"),
-                    "start_time": _parse_datetime(f.get("startTime")),
-                    "status": OddsPapiClient.infer_fixture_status(f),
-                    "has_odds": bool(f.get("hasOdds")),
-                    "raw_json": f,
-                }
-                oddspapi_fixtures.append(fixture_data)
-
-                if not dry_run:
-                    stmt = insert(Fixture).values(id=uuid4(), **fixture_data).on_conflict_do_update(
+            if not dry_run:
+                for t in target_tournaments:
+                    stmt = insert(League).values(
+                        id=uuid4(),
+                        source="oddspapi",
+                        source_id=str(t.get("tournamentId")),
+                        sport=sport_cfg.sport_code,
+                        name=t.get("tournamentName", "Unknown"),
+                        slug=t.get("tournamentSlug"),
+                        raw_json=t,
+                    ).on_conflict_do_update(
                         index_elements=["source", "source_id"],
                         set_={
-                            "team_a_name": fixture_data["team_a_name"],
-                            "team_b_name": fixture_data["team_b_name"],
-                            "start_time": fixture_data["start_time"],
-                            "status": fixture_data["status"],
-                            "has_odds": fixture_data["has_odds"],
-                            "raw_json": fixture_data["raw_json"],
+                            "sport": sport_cfg.sport_code,
+                            "name": t.get("tournamentName"),
+                            "raw_json": t,
                         },
                     )
                     db.execute(stmt)
-
-            if not dry_run:
                 db.commit()
 
-        stats["fixtures_oddspapi"] = len(oddspapi_fixtures)
-        typer.echo(f"   Total: {len(oddspapi_fixtures)} OddsPapi fixtures")
+            typer.echo(f"\n👥 Fetching OddsPapi participants ({sport_cfg.display_name})...")
+            participants = oddspapi.get_participants()
+            stats["teams_oddspapi_by_sport"][sport_cfg.sport_code] = len(participants)
+            stats["teams_oddspapi"] += len(participants)
+            typer.echo(f"   {sport_cfg.display_name}: {len(participants)} teams")
+
+            if not dry_run and participants:
+                for pid, pname in participants.items():
+                    stmt = insert(Team).values(
+                        id=uuid4(),
+                        source="oddspapi",
+                        source_id=str(pid),
+                        name=pname,
+                        raw_json={
+                            "participantId": pid,
+                            "name": pname,
+                            "sport": sport_cfg.sport_code,
+                        },
+                    ).on_conflict_do_update(
+                        index_elements=["source", "source_id"],
+                        set_={"name": pname},
+                    )
+                    db.execute(stmt)
+                db.commit()
+
+            typer.echo(f"\n🎮 Fetching OddsPapi fixtures ({sport_cfg.display_name})...")
+            sport_fixture_count = 0
+            for t in target_tournaments:
+                tid = t.get("tournamentId")
+                tname = t.get("tournamentName", "Unknown")
+
+                league = db.execute(
+                    select(League).where(League.source == "oddspapi", League.source_id == str(tid))
+                ).scalar_one_or_none()
+
+                fixtures = oddspapi.get_fixtures(tid, from_date, to_date)
+                typer.echo(f"   {tname}: {len(fixtures)} fixtures")
+
+                for f in fixtures:
+                    fixture_data = {
+                        "source": "oddspapi",
+                        "source_id": str(f.get("fixtureId")),
+                        "league_id": league.id if league else None,
+                        "team_a_name": f.get("participant1Name"),
+                        "team_b_name": f.get("participant2Name"),
+                        "start_time": _parse_datetime(f.get("startTime")),
+                        "status": OddsPapiClient.infer_fixture_status(f),
+                        "has_odds": bool(f.get("hasOdds")),
+                        "raw_json": f,
+                    }
+                    oddspapi_fixtures.append(fixture_data)
+                    sport_fixture_count += 1
+
+                    if not dry_run:
+                        stmt = insert(Fixture).values(id=uuid4(), **fixture_data).on_conflict_do_update(
+                            index_elements=["source", "source_id"],
+                            set_={
+                                "team_a_name": fixture_data["team_a_name"],
+                                "team_b_name": fixture_data["team_b_name"],
+                                "start_time": fixture_data["start_time"],
+                                "status": fixture_data["status"],
+                                "has_odds": fixture_data["has_odds"],
+                                "raw_json": fixture_data["raw_json"],
+                            },
+                        )
+                        db.execute(stmt)
+
+                if not dry_run:
+                    db.commit()
+
+            stats["fixtures_oddspapi_by_sport"][sport_cfg.sport_code] = sport_fixture_count
+            stats["fixtures_oddspapi"] += sport_fixture_count
+            typer.echo(f"   {sport_cfg.display_name} total: {sport_fixture_count} OddsPapi fixtures")
+
+        typer.echo(f"\n   Overall OddsPapi fixtures: {len(oddspapi_fixtures)}")
 
         # ============================================
         # Step 4a: Polymarket Sports → Leagues
         # ============================================
         typer.echo("\n🔮 Fetching Polymarket sports/leagues...")
-
         sports = polymarket.get_sports()
-        pm_target_leagues = []
-
-        # Look for the "lol" sport entry specifically
-        # Note: "lcs" = Leagues Cup (soccer), "lpl" = Lanka Premier League (cricket)
-        # The actual LoL umbrella is sport="lol"
+        sport_config_by_code = {cfg.sport_code: cfg for cfg in SPORT_CONFIGS}
+        pm_target_leagues: list[tuple[SportConfig, dict]] = []
         for s in sports:
             sport_code = (s.get("sport") or "").lower()
-            if sport_code == "lol":
-                pm_target_leagues.append(s)
-                logger.info("Polymarket LoL found: sport=%s, series=%s", sport_code, s.get("series"))
+            if sport_code in sport_config_by_code:
+                cfg = sport_config_by_code[sport_code]
+                pm_target_leagues.append((cfg, s))
+                logger.info(
+                    "Polymarket %s found: sport=%s, series=%s",
+                    cfg.display_name,
+                    sport_code,
+                    s.get("series"),
+                )
 
-        typer.echo(f"   Found {len(pm_target_leagues)} LoL league(s) from {len(sports)} sports")
+        for cfg in SPORT_CONFIGS:
+            count = sum(1 for league_cfg, _ in pm_target_leagues if league_cfg.sport_code == cfg.sport_code)
+            stats["leagues_polymarket_by_sport"][cfg.sport_code] = count
+            stats["leagues_polymarket"] += count
+            typer.echo(f"   {cfg.display_name}: {count} league(s)")
 
-        # Store Polymarket leagues
         if not dry_run:
-            for s in pm_target_leagues:
+            for cfg, s in pm_target_leagues:
                 series_id = s.get("series") or s.get("id") or ""
                 sport_name = s.get("sport") or "Unknown"
                 stmt = insert(League).values(
                     id=uuid4(),
                     source="polymarket",
                     source_id=str(series_id),
-                    name=f"LoL ({sport_name.upper()})",  # e.g., "LoL (LOL)"
+                    sport=cfg.sport_code,
+                    name=f"{cfg.display_name} ({sport_name.upper()})",
                     slug=sport_name,
                     raw_json=s,
                 ).on_conflict_do_update(
                     index_elements=["source", "source_id"],
-                    set_={"name": f"LoL ({sport_name.upper()})", "raw_json": s},
+                    set_={
+                        "sport": cfg.sport_code,
+                        "name": f"{cfg.display_name} ({sport_name.upper()})",
+                        "raw_json": s,
+                    },
                 )
                 db.execute(stmt)
             db.commit()
 
-        stats["leagues_polymarket"] = len(pm_target_leagues)
-
         # ============================================
-        # Step 4b: Polymarket Teams (for LoL)
+        # Step 4b: Polymarket Teams
         # ============================================
         typer.echo("\n👥 Fetching Polymarket teams...")
+        for cfg in SPORT_CONFIGS:
+            teams = polymarket.get_teams(league=cfg.polymarket_team_league)
+            stats["teams_polymarket_by_sport"][cfg.sport_code] = len(teams)
+            stats["teams_polymarket"] += len(teams)
+            typer.echo(f"   {cfg.display_name}: {len(teams)} teams")
 
-        pm_teams_count = 0
-        # Try fetching teams for "lol" league
-        teams = polymarket.get_teams(league="lol")
-        typer.echo(f"   LoL: {len(teams)} teams")
-
-        if not dry_run and teams:
-            for t in teams:
-                team_id = t.get("teamId") or t.get("id") or ""
-                stmt = insert(Team).values(
-                    id=uuid4(),
-                    source="polymarket",
-                    source_id=str(team_id),
-                    name=t.get("name") or t.get("teamName") or "Unknown",
-                    abbreviation=t.get("abbreviation") or t.get("alias"),
-                    raw_json=t,
-                ).on_conflict_do_update(
-                    index_elements=["source", "source_id"],
-                    set_={"name": t.get("name") or t.get("teamName"), "abbreviation": t.get("abbreviation")},
-                )
-                db.execute(stmt)
-            db.commit()
-
-        pm_teams_count = len(teams)
-        stats["teams_polymarket"] = pm_teams_count
+            if not dry_run and teams:
+                for t in teams:
+                    team_id = t.get("teamId") or t.get("id") or ""
+                    stmt = insert(Team).values(
+                        id=uuid4(),
+                        source="polymarket",
+                        source_id=str(team_id),
+                        name=t.get("name") or t.get("teamName") or "Unknown",
+                        abbreviation=t.get("abbreviation") or t.get("alias"),
+                        raw_json=t,
+                    ).on_conflict_do_update(
+                        index_elements=["source", "source_id"],
+                        set_={"name": t.get("name") or t.get("teamName"), "abbreviation": t.get("abbreviation")},
+                    )
+                    db.execute(stmt)
+                db.commit()
 
         # ============================================
         # Step 4c: Polymarket Events → Fixtures
@@ -344,73 +398,140 @@ def discover_command(days: int, dry_run: bool = False, include_past: bool = Fals
         typer.echo("\n🎮 Fetching Polymarket events...")
 
         polymarket_fixtures = []
-        for league in pm_target_leagues:
-            series_id = league.get("series") or league.get("id")
-            sport_name = league.get("sport") or "lol"
+        for cfg in SPORT_CONFIGS:
+            sport_leagues = [league for league_cfg, league in pm_target_leagues if league_cfg.sport_code == cfg.sport_code]
+            sport_fixture_count = 0
+            typer.echo(f"\n   {cfg.display_name}:")
+            for league in sport_leagues:
+                series_id = league.get("series") or league.get("id")
 
-            # Get league from DB for linking
-            pm_league_db = db.execute(
-                select(League).where(League.source == "polymarket", League.source_id == str(series_id))
-            ).scalar_one_or_none()
+                # Get league from DB for linking
+                pm_league_db = db.execute(
+                    select(League).where(League.source == "polymarket", League.source_id == str(series_id))
+                ).scalar_one_or_none()
 
-            # Fetch open events with game bets tag (closed=False means not resolved yet)
-            events = polymarket.get_events(
-                series_id=str(series_id) if series_id else None,
-                tag_id=settings.polymarket_game_bets_tag_id,
-                active=True,
-                closed=False,  # Only get events that haven't resolved yet
-            )
-            typer.echo(f"   LoL: {len(events)} open events")
+                # Fetch open events with game bets tag (closed=False means not resolved yet)
+                events = polymarket.get_events(
+                    series_id=str(series_id) if series_id else None,
+                    tag_id=settings.polymarket_game_bets_tag_id,
+                    active=True,
+                    closed=False,
+                )
+                typer.echo(f"     {len(events)} open events")
 
-            # Extract markets from events
-            for event in events:
-                markets = event.get("markets") or []
-                if not markets:
-                    # If no nested markets, the event itself might be the market
-                    markets = [event]
+                # Extract markets from events
+                for event in events:
+                    markets = event.get("markets") or []
+                    if not markets:
+                        # If no nested markets, the event itself might be the market
+                        markets = [event]
 
-                match_market: dict | None = None
-                game_markets: list[tuple[dict, int | None]] = []
+                    match_market: dict | None = None
+                    game_markets: list[tuple[dict, int | None]] = []
 
-                for m in markets:
-                    market_class = _classify_polymarket_market(m)
-                    if not market_class:
-                        continue
-                    market_type, game_number = market_class
-                    if market_type == "match_winner":
-                        match_market = m
-                    elif market_type == "game_winner":
-                        game_markets.append((m, game_number))
+                    for m in markets:
+                        market_class = _classify_polymarket_market(m)
+                        if not market_class:
+                            continue
+                        market_type, game_number = market_class
+                        if market_type == "match_winner":
+                            match_market = m
+                        elif market_type == "game_winner":
+                            game_markets.append((m, game_number))
 
-                event_fixture_id = None
-                series_type = _extract_series_type(match_market) if match_market else None
-                event_start = _extract_event_start(event, markets, match_market)
+                    event_fixture_id = None
+                    series_type = _extract_series_type(match_market) if match_market else None
+                    event_start = _extract_event_start(event, markets, match_market)
 
-                if match_market:
-                    team_a, team_b = _extract_polymarket_teams(match_market)
-                    if team_a and team_b:
-                        event_source_id = str(
-                            event.get("id") or event.get("slug") or event.get("eventId") or ""
-                        )
-                        if event_source_id:
+                    if match_market:
+                        team_a, team_b = _extract_polymarket_teams(match_market)
+                        if team_a and team_b:
+                            event_source_id = str(
+                                event.get("id") or event.get("slug") or event.get("eventId") or ""
+                            )
+                            if event_source_id:
+                                fixture_data = {
+                                    "source": "polymarket",
+                                    "source_id": event_source_id,
+                                    "league_id": pm_league_db.id if pm_league_db else None,
+                                    "team_a_name": team_a,
+                                    "team_b_name": team_b,
+                                    "start_time": event_start,
+                                    "status": "upcoming"
+                                    if event.get("active") and not event.get("closed")
+                                    else "finished",
+                                    "has_odds": False,
+                                    "market_type": "event",
+                                    "game_number": None,
+                                    "series_type": series_type,
+                                    "parent_fixture_id": None,
+                                    "raw_json": event,
+                                }
+                                polymarket_fixtures.append(fixture_data)
+                                sport_fixture_count += 1
+
+                                if not dry_run:
+                                    stmt = insert(Fixture).values(
+                                        id=uuid4(), **fixture_data
+                                    ).on_conflict_do_update(
+                                        index_elements=["source", "source_id"],
+                                        set_={
+                                            "league_id": fixture_data["league_id"],
+                                            "team_a_name": fixture_data["team_a_name"],
+                                            "team_b_name": fixture_data["team_b_name"],
+                                            "start_time": fixture_data["start_time"],
+                                            "status": fixture_data["status"],
+                                            "market_type": fixture_data["market_type"],
+                                            "game_number": fixture_data["game_number"],
+                                            "series_type": fixture_data["series_type"],
+                                            "parent_fixture_id": fixture_data["parent_fixture_id"],
+                                            "raw_json": fixture_data["raw_json"],
+                                        },
+                                    )
+                                    db.execute(stmt)
+                                    parent = db.execute(
+                                        select(Fixture).where(
+                                            Fixture.source == "polymarket",
+                                            Fixture.source_id == event_source_id,
+                                        )
+                                    ).scalar_one_or_none()
+                                    if parent:
+                                        event_fixture_id = parent.id
+
+                    if match_market:
+                        team_a, team_b = _extract_polymarket_teams(match_market)
+                        if team_a and team_b:
                             fixture_data = {
                                 "source": "polymarket",
-                                "source_id": event_source_id,
+                                "source_id": str(
+                                    match_market.get("id")
+                                    or match_market.get("conditionId")
+                                    or event.get("id")
+                                ),
                                 "league_id": pm_league_db.id if pm_league_db else None,
                                 "team_a_name": team_a,
                                 "team_b_name": team_b,
-                                "start_time": event_start,
+                                "start_time": _parse_datetime(
+                                    match_market.get("gameStartTime")
+                                    or match_market.get("game_start_time")
+                                    or event.get("startDateIso")
+                                    or event.get("startDate")
+                                    or match_market.get("startDateIso")
+                                    or match_market.get("startDate")
+                                ),
                                 "status": "upcoming"
-                                if event.get("active") and not event.get("closed")
+                                if (match_market.get("active") or event.get("active"))
+                                and not (match_market.get("closed") or event.get("closed"))
                                 else "finished",
-                                "has_odds": False,
-                                "market_type": "event",
+                                "has_odds": True,
+                                "market_type": "match_winner",
                                 "game_number": None,
                                 "series_type": series_type,
-                                "parent_fixture_id": None,
-                                "raw_json": event,
+                                "parent_fixture_id": event_fixture_id,
+                                "raw_json": match_market,
                             }
                             polymarket_fixtures.append(fixture_data)
+                            sport_fixture_count += 1
 
                             if not dry_run:
                                 stmt = insert(Fixture).values(
@@ -434,45 +555,44 @@ def discover_command(days: int, dry_run: bool = False, include_past: bool = Fals
                                 parent = db.execute(
                                     select(Fixture).where(
                                         Fixture.source == "polymarket",
-                                        Fixture.source_id == event_source_id,
+                                        Fixture.source_id == fixture_data["source_id"],
                                     )
                                 ).scalar_one_or_none()
-                                if parent:
-                                    event_fixture_id = parent.id
+                                if parent and not event_fixture_id:
+                                    event_fixture_id = parent.parent_fixture_id
 
-                if match_market:
-                    team_a, team_b = _extract_polymarket_teams(match_market)
-                    if team_a and team_b:
+                    for m, game_number in game_markets:
+                        team_a, team_b = _extract_polymarket_teams(m)
+                        if not team_a or not team_b:
+                            continue
+                        game_series_type = _extract_series_type(m) or series_type
                         fixture_data = {
                             "source": "polymarket",
-                            "source_id": str(
-                                match_market.get("id")
-                                or match_market.get("conditionId")
-                                or event.get("id")
-                            ),
+                            "source_id": str(m.get("id") or m.get("conditionId") or event.get("id")),
                             "league_id": pm_league_db.id if pm_league_db else None,
                             "team_a_name": team_a,
                             "team_b_name": team_b,
                             "start_time": _parse_datetime(
-                                match_market.get("gameStartTime")
-                                or match_market.get("game_start_time")
+                                m.get("gameStartTime")
+                                or m.get("game_start_time")
+                                or m.get("startDateIso")
+                                or m.get("startDate")
                                 or event.get("startDateIso")
                                 or event.get("startDate")
-                                or match_market.get("startDateIso")
-                                or match_market.get("startDate")
                             ),
                             "status": "upcoming"
-                            if (match_market.get("active") or event.get("active"))
-                            and not (match_market.get("closed") or event.get("closed"))
+                            if (m.get("active") or event.get("active"))
+                            and not (m.get("closed") or event.get("closed"))
                             else "finished",
                             "has_odds": True,
-                            "market_type": "match_winner",
-                            "game_number": None,
-                            "series_type": series_type,
+                            "market_type": "game_winner",
+                            "game_number": game_number,
+                            "series_type": game_series_type,
                             "parent_fixture_id": event_fixture_id,
-                            "raw_json": match_market,
+                            "raw_json": m,
                         }
                         polymarket_fixtures.append(fixture_data)
+                        sport_fixture_count += 1
 
                         if not dry_run:
                             stmt = insert(Fixture).values(
@@ -493,72 +613,15 @@ def discover_command(days: int, dry_run: bool = False, include_past: bool = Fals
                                 },
                             )
                             db.execute(stmt)
-                            parent = db.execute(
-                                select(Fixture).where(
-                                    Fixture.source == "polymarket",
-                                    Fixture.source_id == fixture_data["source_id"],
-                                )
-                            ).scalar_one_or_none()
-                            if parent and not event_fixture_id:
-                                event_fixture_id = parent.parent_fixture_id
 
-                for m, game_number in game_markets:
-                    team_a, team_b = _extract_polymarket_teams(m)
-                    if not team_a or not team_b:
-                        continue
-                    game_series_type = _extract_series_type(m) or series_type
-                    fixture_data = {
-                        "source": "polymarket",
-                        "source_id": str(m.get("id") or m.get("conditionId") or event.get("id")),
-                        "league_id": pm_league_db.id if pm_league_db else None,
-                        "team_a_name": team_a,
-                        "team_b_name": team_b,
-                        "start_time": _parse_datetime(
-                            m.get("gameStartTime")
-                            or m.get("game_start_time")
-                            or m.get("startDateIso")
-                            or m.get("startDate")
-                            or event.get("startDateIso")
-                            or event.get("startDate")
-                        ),
-                        "status": "upcoming"
-                        if (m.get("active") or event.get("active"))
-                        and not (m.get("closed") or event.get("closed"))
-                        else "finished",
-                        "has_odds": True,
-                        "market_type": "game_winner",
-                        "game_number": game_number,
-                        "series_type": game_series_type,
-                        "parent_fixture_id": event_fixture_id,
-                        "raw_json": m,
-                    }
-                    polymarket_fixtures.append(fixture_data)
+                if not dry_run:
+                    db.commit()
 
-                    if not dry_run:
-                        stmt = insert(Fixture).values(
-                            id=uuid4(), **fixture_data
-                        ).on_conflict_do_update(
-                            index_elements=["source", "source_id"],
-                            set_={
-                                "league_id": fixture_data["league_id"],
-                                "team_a_name": fixture_data["team_a_name"],
-                                "team_b_name": fixture_data["team_b_name"],
-                                "start_time": fixture_data["start_time"],
-                                "status": fixture_data["status"],
-                                "market_type": fixture_data["market_type"],
-                                "game_number": fixture_data["game_number"],
-                                "series_type": fixture_data["series_type"],
-                                "parent_fixture_id": fixture_data["parent_fixture_id"],
-                                "raw_json": fixture_data["raw_json"],
-                            },
-                        )
-                        db.execute(stmt)
-
-            if not dry_run:
-                db.commit()
+            stats["fixtures_polymarket_by_sport"][cfg.sport_code] = sport_fixture_count
+            stats["fixtures_polymarket"] += sport_fixture_count
+            typer.echo(f"     {cfg.display_name} total fixtures: {sport_fixture_count}")
 
         typer.echo(f"   Total: {len(polymarket_fixtures)} Polymarket fixtures")
-        stats["fixtures_polymarket"] = len(polymarket_fixtures)
 
         # ============================================
         # Step 5: Build Mappings
@@ -658,9 +721,30 @@ def discover_command(days: int, dry_run: bool = False, include_past: bool = Fals
     typer.echo("\n" + "=" * 60)
     typer.echo("📊 Discovery Summary")
     typer.echo("=" * 60)
-    typer.echo(f"Leagues:      OddsPapi={stats['leagues_oddspapi']}, Polymarket={stats['leagues_polymarket']}")
-    typer.echo(f"Teams:        OddsPapi={stats['teams_oddspapi']}, Polymarket={stats['teams_polymarket']}")
-    typer.echo(f"Fixtures:     OddsPapi={stats['fixtures_oddspapi']}, Polymarket={stats['fixtures_polymarket']}")
+    for cfg in SPORT_CONFIGS:
+        typer.echo(f"{cfg.display_name}:")
+        typer.echo(
+            "  Leagues:    "
+            f"OddsPapi={stats['leagues_oddspapi_by_sport'][cfg.sport_code]}, "
+            f"Polymarket={stats['leagues_polymarket_by_sport'][cfg.sport_code]}"
+        )
+        typer.echo(
+            "  Teams:      "
+            f"OddsPapi={stats['teams_oddspapi_by_sport'][cfg.sport_code]}, "
+            f"Polymarket={stats['teams_polymarket_by_sport'][cfg.sport_code]}"
+        )
+        typer.echo(
+            "  Fixtures:   "
+            f"OddsPapi={stats['fixtures_oddspapi_by_sport'][cfg.sport_code]}, "
+            f"Polymarket={stats['fixtures_polymarket_by_sport'][cfg.sport_code]}"
+        )
+    typer.echo("")
+    typer.echo(
+        f"Totals:       "
+        f"Leagues O={stats['leagues_oddspapi']} P={stats['leagues_polymarket']} | "
+        f"Teams O={stats['teams_oddspapi']} P={stats['teams_polymarket']} | "
+        f"Fixtures O={stats['fixtures_oddspapi']} P={stats['fixtures_polymarket']}"
+    )
     typer.echo(f"Mappings:     {stats['mappings_created']} new ({stats['mappings_high_confidence']} high confidence)")
 
     # ============================================

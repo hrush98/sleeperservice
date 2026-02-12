@@ -1,8 +1,8 @@
 # Architecture
-LoL Lead–Lag Arbitrage Bot (v2 — simplified MVP)
+LoL + CS2 Lead–Lag Arbitrage Bot (v2 — simplified MVP)
 
 ## Overview
-Two-mode system for detecting lead–lag inefficiencies between Pinnacle (via OddsPapi) and Polymarket LoL markets.
+Two-mode system for detecting lead–lag inefficiencies between Pinnacle (via OddsPapi) and Polymarket sports markets (currently LoL + CS2).
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -39,17 +39,17 @@ Two-mode system for detecting lead–lag inefficiencies between Pinnacle (via Od
 
 ## Mode 1: Discovery (CLI)
 
-**Purpose:** Collect upcoming LoL matches and build mappings between OddsPapi and Polymarket.
+**Purpose:** Collect upcoming LoL + CS2 matches and build mappings between OddsPapi and Polymarket.
 
 **When to run:** On-demand, before matches start. E.g., once per day or week.
 
 ### OddsPapi flow
 ```
-/v4/tournaments?sportId=18
-    → Filter to: LCK, LPL, LEC, LCS/LTA, LCP, CBLOL
+/v4/tournaments?sportId=18 (LoL), /v4/tournaments?sportId=17 (CS2)
+    → Filter to configured LoL + CS2 target leagues
     → Store in: leagues table
 
-/v4/participants?sportId=18
+/v4/participants?sportId=18/17
     → Store in: teams table (participantId → name)
 
 /v4/fixtures?tournamentId=X&from=...&to=...&hasOdds=true
@@ -59,7 +59,7 @@ Two-mode system for detecting lead–lag inefficiencies between Pinnacle (via Od
 ### Polymarket flow
 ```
 /sports
-    → Filter to LoL leagues (series_id)
+    → Filter to LoL + CS2 sports (series_id)
     → Store in: leagues table
 
 /teams?league=...
@@ -243,8 +243,8 @@ Polymarket WS book state ───────► top-of-book + depth (in-memory
 - Base: `https://api.oddspapi.io`
 - Auth: `?apiKey=...`
 - Endpoints used:
-  - `/v4/tournaments?sportId=18` — LoL leagues
-  - `/v4/participants?sportId=18` — team names
+  - `/v4/tournaments?sportId=18|17` — LoL + CS2 leagues
+  - `/v4/participants?sportId=18|17` — team names
   - `/v4/fixtures?tournamentId=X&...` — upcoming matches
   - `/v4/odds?fixtureId=X&bookmakers=pinnacle` — live odds
 - Cooldowns: 500ms–2000ms per endpoint
@@ -252,8 +252,8 @@ Polymarket WS book state ───────► top-of-book + depth (in-memory
 ### Polymarket (target)
 - Base: `https://gamma-api.polymarket.com`
 - Endpoints used:
-  - `/sports` — LoL leagues (series_id)
-  - `/teams?league=...` — team names
+  - `/sports` — LoL + CS2 leagues (series_id)
+  - `/teams?league=lol|counter-strike` — team names
   - `/events?series_id=X&tag_id=100639` — upcoming matches
   - CLOB orderbook (separate endpoint) — live prices
 
