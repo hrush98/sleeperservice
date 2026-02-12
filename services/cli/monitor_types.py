@@ -113,6 +113,8 @@ class PaperTrade:
     status: str = "open"
     external_order_id: str | None = None
     external_status: str | None = None
+    delayed_retries: int = 0
+    last_retry_ts: datetime | None = None
 
 
 class LogBuffer:

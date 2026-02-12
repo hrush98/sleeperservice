@@ -24,3 +24,7 @@ migrations/**/__pycache__/
 
 # Runtime logs
 logs/
+
+notes.odt
+.~lock.notes.odt#
+docs/goal_serve.md

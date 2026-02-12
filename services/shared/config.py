@@ -101,7 +101,7 @@ class Settings(BaseSettings):
     # Edge calculation
     alpha_min: float = 0.03
     alpha_spread_factor: float = 1.5
-    exit_epsilon: float = 0.01
+    exit_epsilon: float = 0.015
 
     # Live monitoring
     monitor_poll_interval_seconds: int = 5
@@ -114,16 +114,30 @@ class Settings(BaseSettings):
 
     # Live trading safeguards (only used in live mode)
     live_max_usd_per_order: float = 2.0
-    live_max_shares_per_order: float = 50.0
-    live_max_open_positions: int = 2
+    live_max_shares_per_order: float = 100.0
+    live_max_open_positions: int = 5
     live_min_seconds_between_orders: float = 3.0
     live_share_step: float = 0.0001
+    min_book_depth_usd: float = 50.0  # Skip entry when bid-side USD depth is below this
     live_kill_switch_path: str = "~/.sleeprservice/keys/STOP_TRADING"
     live_require_allowance_check: bool = True
+    # Stop-loss guards
+    stop_thesis_death_enabled: bool = True   # exit when p_ref < entry_price
+    stop_hard_enabled: bool = True           # exit when bid drops X% below entry
+    stop_hard_pct: float = 0.20             # hard stop threshold (20%)
+
     exit_order_not_found_seconds: float = 60.0
+    exit_gtc_reprice_seconds: float = 12.0
+    exit_price_step_ticks: int = 1
     exit_phantom_id_null_threshold: int = 5
     exit_max_attempts: int = 5
     exit_retry_cooldown_seconds: float = 30.0
+    exit_degraded_chunk_fraction: float = 0.25
+    balance_poll_interval_seconds: float = 30.0
+    stale_position_sweep_seconds: float = 300.0
+    delayed_grace_seconds: float = 5.0
+    delayed_retry_cooldown_seconds: float = 2.0
+    delayed_max_retries: int = 2
 
     # Logging
     # When running the live TUI, stdout logging is redirected into the on-screen buffer.
@@ -138,6 +152,8 @@ class Settings(BaseSettings):
     # Stored timestamps remain UTC; this is for human-friendly rendering.
     # Use an IANA timezone name (e.g. "America/Los_Angeles").
     display_timezone: str = "America/Los_Angeles"
+    # Max completed positions to show in live TUI positions panel.
+    live_positions_limit: int = 20
 
     # API
     api_host: str = "0.0.0.0"

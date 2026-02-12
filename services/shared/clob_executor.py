@@ -56,6 +56,15 @@ class OrderSubmission:
     raw: dict
 
 
+@dataclass
+class CancelSubmission:
+    success: bool
+    canceled: list[str]
+    not_canceled: dict[str, Any] | None
+    error_msg: str | None
+    raw: dict
+
+
 class ClobExecutor:
     """Small wrapper for placing and checking orders via py-clob-client."""
 
@@ -160,6 +169,43 @@ class ClobExecutor:
         amount: float,
         tick_size: float | None = None,
     ) -> OrderSubmission:
+        return self._place_order(
+            token_id=token_id,
+            side=side,
+            price=price,
+            amount=amount,
+            tick_size=tick_size,
+            order_type=OrderType.FAK,
+        )
+
+    def place_gtc_order(
+        self,
+        *,
+        token_id: str,
+        side: str,
+        price: float,
+        amount: float,
+        tick_size: float | None = None,
+    ) -> OrderSubmission:
+        return self._place_order(
+            token_id=token_id,
+            side=side,
+            price=price,
+            amount=amount,
+            tick_size=tick_size,
+            order_type=OrderType.GTC,
+        )
+
+    def _place_order(
+        self,
+        *,
+        token_id: str,
+        side: str,
+        price: float,
+        amount: float,
+        tick_size: float | None = None,
+        order_type: OrderType | None = None,
+    ) -> OrderSubmission:
         if self.check_kill_switch():
             return OrderSubmission(
                 success=False,
@@ -188,7 +234,7 @@ class ClobExecutor:
             side=order_side,
             amount=amount,
             price=price,
-            order_type=OrderType.FAK,
+            order_type=order_type or OrderType.FAK,
         )
         try:
             options = (
@@ -197,8 +243,8 @@ class ClobExecutor:
                 else None
             )
             signed = self._client.create_market_order(order_args, options)
-            response = self._client.post_order(signed, OrderType.FAK)
-        except Exception as exc:  # pragma: no cover - network/venue guardrail
+            response = self._client.post_order(signed, order_type or OrderType.FAK)
+        except Exception as exc:  # pragma: no cover - network/venue guardrail  # pylint: disable=broad-exception-caught
             raw: dict[str, Any] = {
                 "exception_type": type(exc).__name__,
                 "exception": str(exc),
@@ -233,6 +279,50 @@ class ClobExecutor:
 
     def get_order(self, order_id: str) -> dict[str, Any]:
         return self._client.get_order(order_id)
+
+    def cancel_order(self, order_id: str) -> CancelSubmission:
+        """Best-effort cancel wrapper for a single CLOB order id."""
+        try:
+            response = self._client.cancel(order_id=order_id)
+        except Exception as exc:  # pragma: no cover - network/venue guardrail  # pylint: disable=broad-exception-caught
+            raw: dict[str, Any] = {
+                "exception_type": type(exc).__name__,
+                "exception": str(exc),
+                "order_id": order_id,
+            }
+            return CancelSubmission(
+                success=False,
+                canceled=[],
+                not_canceled={order_id: str(exc)},
+                error_msg=str(exc),
+                raw=raw,
+            )
+        if not isinstance(response, dict):
+            return CancelSubmission(
+                success=False,
+                canceled=[],
+                not_canceled={order_id: "invalid_cancel_response"},
+                error_msg="invalid_cancel_response",
+                raw={"response_type": type(response).__name__, "order_id": order_id},
+            )
+        canceled_raw = response.get("canceled")
+        canceled = canceled_raw if isinstance(canceled_raw, list) else []
+        not_canceled = response.get("not_canceled")
+        not_canceled_map = not_canceled if isinstance(not_canceled, dict) else None
+        success = order_id in canceled or bool(canceled)
+        if not success and not_canceled_map and order_id in not_canceled_map:
+            error_msg = str(not_canceled_map.get(order_id))
+        elif not success:
+            error_msg = "cancel_failed"
+        else:
+            error_msg = None
+        return CancelSubmission(
+            success=success,
+            canceled=canceled,
+            not_canceled=not_canceled_map,
+            error_msg=error_msg,
+            raw=response,
+        )
 
 
 def _quantize_price(value: float, tick_size: str | None = None) -> float:

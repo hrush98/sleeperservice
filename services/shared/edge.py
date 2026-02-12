@@ -147,3 +147,17 @@ def compute_exit_signal(p_ref: float | None, bid: float | None, epsilon: float =
         return False
     return (p_ref - bid) <= epsilon
 
+
+def check_thesis_death(p_ref: float | None, entry_price: float) -> bool:
+    """True when the reference probability drops below entry price (thesis invalidated)."""
+    if p_ref is None:
+        return False
+    return p_ref < entry_price
+
+
+def check_hard_stop(bid: float | None, entry_price: float, stop_pct: float) -> bool:
+    """True when bid falls ``stop_pct`` or more below entry price."""
+    if bid is None:
+        return False
+    return bid <= entry_price * (1.0 - stop_pct)
+

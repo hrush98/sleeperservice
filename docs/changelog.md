@@ -29,7 +29,167 @@ The "candidate" abstraction is too broad. You load every mapped match within a t
 The UI is coupled to the polling logic. The snapshot loop builds UI state AND processes trade signals in the same iteration, so a UI display bug (wrong bucket) can interact with trading logic, and vice versa.
 Rich Live + stdin is fragile. Rich's Live context redraws the entire screen every tick. Reading from stdin while that's happening is fundamentally awkward in a terminal.
 
+## 2026-02-11 — Exit Execution Overhaul: GTC + Reprice + Balance Reconcile
+
+### What changed
+- Switched live exits from FAK SELL submits to GTC SELL submits in `trader.py`/`clob_executor.py` so exits can rest on-book instead of immediately dying in thin books.
+- Added attempt-aware exit pricing with progressive urgency (`_compute_exit_limit_price`): first retries are patient, later retries improve by ticks, and stop-loss exits start more aggressive.
+- Added proactive cancel-and-reprice for GTC exits after a short timeout (`exit_gtc_reprice_seconds`) instead of waiting the full `exit_order_not_found_seconds` path.
+- Added periodic balance reconciliation for open live positions (`balance_poll_interval_seconds`) to detect manual Polymarket closes and auto-sync/auto-close DB state.
+- Added stale open-position sweep on startup and periodic cadence (`stale_position_sweep_seconds`) to reconcile resolved markets and close stale rows with `stale_reconciled`.
+
+### Design decisions
+- Keep entry execution unchanged; scope the order-type change to exits only.
+- Use a short GTC reprice loop while preserving existing fallback hierarchy (REST/WS/balance) for safety.
+- Keep all new cadences/tunables in `config.py` to avoid hardcoded timing and support quick operational tuning.
+- Preserve full auditability by writing order type, attempt count, bid-at-submit, and chosen limit price into `order_attempts.raw_json`/`trade_events.raw_json`.
+
+### Why
+Recent live data showed exits stuck in `timeout_reopen` loops: FAK-at-bid in thin LFL books frequently produced no durable order state, then the bot waited long timeout windows before reopening. This caused repeated retries, stale exposure, and required manual UI closes. The new flow is designed to improve liveness and reconcile manual intervention quickly.
+
+### Impact
+- Exit behavior in live mode now prefers persistence + repricing over repeated instant-kill FAK attempts.
+- Manual/external closes are now detected and reconciled faster via periodic balance polling.
+- Stale open positions on resolved fixtures can now auto-close (`exit_reason=stale_reconciled`) when balance is zero.
+- No schema changes or migrations required.
+
+### How to verify
+- `conda run -n poly python -m pytest tests/test_clob_executor.py tests/test_order_attempts.py -q` -> 18 passed
+- `conda run -n poly python -m pytest tests/test_stop_loss.py -q` -> 9 passed
+- Live smoke:
+  - open a position, manually close it on Polymarket UI, and confirm bot records an `EXIT` reconciliation event and closes local position without waiting for a long timeout loop.
+  - force repeated failed exits and confirm retry submits use GTC with progressively improved limit prices.
+
+```mermaid
+flowchart TD
+  exitSignal[ExitSignal] --> submitGtc[SubmitGTCExit]
+  submitGtc --> fillCheck{FilledOrPartial}
+  fillCheck -->|Yes| finalizeExit[FinalizeExit]
+  fillCheck -->|NoAfterShortTimeout| cancelOrder[CancelOrder]
+  cancelOrder --> balanceCheck[BalanceCheck]
+  balanceCheck -->|ZeroBalance| reconcileClosed[ReconcileClosed]
+  balanceCheck -->|RemainingShares| reopenRetry[ReopenAndRetryWithNewPrice]
+  reopenRetry --> submitGtc
+  manualClose[ManualCloseInPMUI] --> periodicBalancePoll[PeriodicBalancePoll]
+  periodicBalancePoll --> reconcileClosed
+```
+
+## 2026-02-11 — Stop-Loss Guards: Thesis Death + Hard Stop
+
+### What changed
+- Added two stop-loss exit conditions to `_check_for_exits` in `trader.py`, evaluated **before** the existing convergence check:
+  1. **Thesis death** — exit when `p_ref < entry_price` (the reference source invalidates the entry thesis).
+  2. **Hard stop** — exit when `bid <= entry_price * (1 - stop_hard_pct)` (price-based drawdown cap, default 20%).
+- Extracted `check_thesis_death()` and `check_hard_stop()` predicates into `edge.py` alongside `compute_exit_signal`.
+- Added three config tunables: `stop_thesis_death_enabled`, `stop_hard_enabled`, `stop_hard_pct`.
+- New test file `tests/test_stop_loss.py` (9 tests) covering both guards, None safety, and priority ordering.
+
+### Design decisions
+- Priority chain: `market_ended` → `thesis_death` → `hard_stop` → `convergence`. Thesis death fires first because if the oracle itself says you're wrong, price-based stops are redundant.
+- Both guards are independently toggle-able via config flags, defaulting to enabled.
+- Hard stop at 20% (not 10%) to avoid getting stopped by noise in thin prediction-market books.
+
+### Why
+A live trade entered at 0.27 (p_ref 0.3253, +5.5% edge) exited at 0.16 for a **-40.7% loss** because p_ref collapsed and the only exit condition was edge-convergence — which fires identically for profitable convergence and adverse convergence. The system had no mechanism to cut losses when the thesis itself was invalidated.
+
+### Impact
+- Positions may now close with `exit_reason` values `thesis_death` or `hard_stop` (in addition to existing `convergence` and `market_ended`).
+- No schema changes required; `exit_reason` is a free-text string column.
+
+### How to verify
+- `conda run -n poly python -m pytest tests/test_stop_loss.py -v` → 9 passed.
+- `conda run -n poly python -m pytest tests/ -v` → 38 passed, 0 regressions.
+
+## 2026-02-10 — Positions panel in Live TUI
+
+### What changed
+- Added a **Positions** panel to the live TUI, separate from the Trade Tape, showing open and closed positions for the selected match.
+- Positions are loaded from the database by `mapping_id`; open positions first, then closed (newest first), limited by `live_positions_limit` (config, default 20).
+- Panel columns: State (open/closed), Market, Side, Entry, Qty, Exit, PnL%, Opened, Closed. Timestamps use `display_timezone`.
+
+### Design decisions
+- Query runs in the main (render) thread each refresh; no caching (acceptable for small limits and single-match scope).
+- Tunable `live_positions_limit` in `config.py` per project rules.
+
+### Why
+Operators want to see current and recent positions for the live match alongside the trade tape, without switching context.
+
+### Impact
+- New TUI section between Focus and Trade Tape. No schema or API changes.
+
+### How to verify
+- `conda run -n poly python -m pytest tests/ -q --ignore=tests/test_live_display_classifier.py` → all pass.
+- Run `python -m cli live`, select a match that has positions in DB; confirm the Positions panel shows open/closed rows with entry, qty, exit, PnL%, and times.
+
 ## 2026-02-08 — Exit Retry Guardrails + Phantom Order Recovery (Live)
+
+## 2026-02-10 — Delayed Order Cancel+Retry (Entry + Exit)
+
+### What changed
+- Added CLOB cancel support in `clob_executor.py` via `cancel_order(order_id)` with safe structured error handling.
+- Added delayed-order retry tunables in `config.py`: `delayed_grace_seconds` (5s), `delayed_retry_cooldown_seconds` (2s), `delayed_max_retries` (2).
+- Entry path now treats `submitted+delayed` as a retryable state: after grace/cooldown it cancels the old order, finalizes prior attempt as `superseded_delayed`, and resubmits on the same position.
+- Exit reconciliation now handles `status=delayed` similarly: after grace/cooldown it cancels, finalizes old attempt as `superseded_delayed`, and reopens exit for fresh snapshot-driven resubmission.
+- Added tests for delayed retry readiness gating and cancel wrapper behavior.
+
+### Design decisions
+- Apply the same retry policy to both entry and exit to keep behavior predictable under delayed venue responses.
+- Keep retries bounded and time-gated (max retries + cooldown) to avoid churn/storm loops during unstable books.
+- For entry retries, enforce effective cooldown with existing throttle (`max(delayed_retry_cooldown_seconds, live_min_seconds_between_orders)`).
+- Retry attempts stay fully auditable in `order_attempts` and `trade_events` with explicit supersede reasons.
+
+### Why
+Delayed responses frequently blocked new entries/exits for long windows and produced skip storms even when the prior order was unlikely to execute. This change restores liveness without dropping auditability.
+
+### Impact
+- Live runs should spend less time stuck behind delayed submissions.
+- `ENTRY_SKIP already_open` frequency should drop for delayed-only submitted positions.
+- New event/attempt trail should show superseded delayed attempts before retries.
+- No schema migration required.
+
+### How to verify
+- `conda run -n poly pytest -q tests/test_clob_executor.py tests/test_order_attempts.py` -> tests pass.
+- Live smoke: trigger a delayed order and confirm:
+  - retry does not fire before 5s grace,
+  - cancel+retry occurs after grace when still valid,
+  - retries stop after configured max,
+  - exit delayed attempts reopen and resubmit with fresh snapshot checks.
+
+```mermaid
+flowchart TD
+  delayedSubmit[DelayedSubmit] --> graceWait[WaitGracePeriod]
+  graceWait --> retryCheck{RetryAllowedAndStillValid}
+  retryCheck -->|No| keepPending[KeepPendingOrTimeout]
+  retryCheck -->|Yes| cancelOld[CancelOldOrder]
+  cancelOld --> finalizeOld[FinalizeAttemptAsSuperseded]
+  finalizeOld --> resubmit[ResubmitOrder]
+  resubmit --> reconcile[NormalReconciliation]
+```
+
+## 2026-02-10 — Degraded Exit Chunking After Max Attempts
+
+### What changed
+- Updated live exit submission so hitting `exit_max_attempts` no longer hard-stops the position.
+- When attempts are exhausted, the bot now submits a degraded SELL chunk sized by `exit_degraded_chunk_fraction` (default 25% of remaining quantity), still using existing cooldown and safety checks.
+- Added `exit_degraded_chunk_fraction` config knob in `config.py`.
+- Added tests for chunk-size computation and fraction clamping.
+
+### Design decisions
+- Keep edit scope minimal by changing only `_submit_live_exit` attempt-limit behavior.
+- Reuse existing `exit_retry_cooldown_seconds` and allowance checks to avoid introducing new cadence paths.
+- Persist degraded context in `order_attempts.raw_json` and `trade_events.raw_json` for auditability.
+
+### Why
+Hard-blocking after max exit attempts left positions stranded in exactly the scenarios where liquidity was thin and delayed IDs were common. Chunked offload improves liveness while preserving guardrails.
+
+### Impact
+- Positions that previously remained blocked after 5 failed exits can continue unwinding in 25% chunks.
+- No schema changes or migrations.
+
+### How to verify
+- `conda run -n poly pytest -q tests/test_order_attempts.py`
+- `conda run -n poly env PYTHONPATH=. pytest -q`
+- Live: reproduce a stuck exit and confirm subsequent `EXIT_SUBMIT` events continue with reduced `sell_shares` and degraded metadata.
 
 ### What changed
 - Normalize balance/allowance values from raw on-chain units using configurable token decimals.

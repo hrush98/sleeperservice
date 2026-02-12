@@ -5,6 +5,7 @@ Rich TUI rendering for single-match live monitor.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from rich import box
 from rich.layout import Layout
@@ -12,6 +13,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from shared.config import settings
 from .monitor_types import FocusSnapshot, LogBuffer, PerfStats, format_market_label
 
 
@@ -19,7 +21,8 @@ def build_layout() -> Layout:
     layout = Layout()
     layout.split_column(
         Layout(name="header", size=3),
-        Layout(name="focus", ratio=2),
+        Layout(name="focus", ratio=3),
+        Layout(name="positions", ratio=2),
         Layout(name="trade_tape", size=8),
         Layout(name="logs", size=8),
         Layout(name="input", size=3),
@@ -39,6 +42,7 @@ def render_layout(
     input_text: str,
     pm_question: str | None = None,
     pm_condition_id: str | None = None,
+    positions: list | None = None,
 ) -> None:
     snapshot = snapshots[0] if snapshots else None
     layout["header"].update(
@@ -59,6 +63,9 @@ def render_layout(
             _build_focus_panel(snapshots, spread_factor),
             title="Focus",
         )
+    )
+    layout["positions"].update(
+        Panel(_build_positions_panel(positions or []), title="Completed Positions")
     )
     layout["trade_tape"].update(Panel(trade_buffer.render(), title="Trade Tape"))
     layout["logs"].update(Panel(log_buffer.render(), title="Logs"))
@@ -153,6 +160,56 @@ def _split_match(match: str) -> tuple[str, str]:
         if left and right:
             return left, right
     return "A", "B"
+
+
+def _format_ts(dt: datetime | None) -> str:
+    if dt is None:
+        return "-"
+    try:
+        tz = ZoneInfo(settings.display_timezone)
+    except ZoneInfoNotFoundError:
+        tz = timezone.utc
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(tz).strftime("%H:%M:%S")
+
+
+def _build_positions_panel(positions: list) -> Table | Text:
+    """Build a table of recent completed positions."""
+    if not positions:
+        return Text("No completed positions for this match.", style="dim")
+    table = Table(show_header=True, header_style="bold", box=box.SIMPLE, expand=True)
+    table.add_column("Market", no_wrap=True)
+    table.add_column("Side", no_wrap=True)
+    table.add_column("Entry", justify="right", no_wrap=True)
+    table.add_column("Qty", justify="right", no_wrap=True)
+    table.add_column("Exit", justify="right", no_wrap=True)
+    table.add_column("PnL%", justify="right", no_wrap=True)
+    table.add_column("Opened", no_wrap=True)
+    table.add_column("Closed", no_wrap=True)
+    for pos in positions:
+        market = format_market_label(pos.market_type, pos.game_number)
+        entry = f"{pos.entry_price:.3f}" if pos.entry_price is not None else "-"
+        qty = f"{pos.quantity:.2f}" if pos.quantity is not None else "-"
+        exit_price = (
+            f"{pos.exit_price:.3f}" if pos.exit_price is not None else "-"
+        )
+        pnl = (
+            f"{pos.pnl_percent:+.2f}%" if pos.pnl_percent is not None else "-"
+        )
+        opened = _format_ts(pos.opened_at)
+        closed = _format_ts(pos.closed_at)
+        table.add_row(
+            market,
+            pos.side or "-",
+            entry,
+            qty,
+            exit_price,
+            pnl,
+            opened,
+            closed,
+        )
+    return table
 
 
 def _build_input_panel(input_text: str) -> Text:

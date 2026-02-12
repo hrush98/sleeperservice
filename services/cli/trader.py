@@ -19,12 +19,19 @@ from sqlalchemy.dialects.postgresql import insert
 
 from shared.config import settings
 from shared.db import SessionLocal
-from shared.edge import NetEdgeResult, compute_alpha_entry, compute_entry_edge, compute_exit_signal
+from shared.edge import (
+    NetEdgeResult,
+    check_hard_stop,
+    check_thesis_death,
+    compute_alpha_entry,
+    compute_entry_edge,
+    compute_exit_signal,
+)
 from shared.fixture_state import FixtureStateManager, TriggerEvent
 from shared.models import Fixture, Mapping, OrderAttempt, Position, TradeEvent
 from shared.polymarket_user_ws import PolymarketUserWSManager
 from shared.polymarket_ws import BookState, PolymarketWSManager
-from shared.clob_executor import ClobExecutor, OrderSubmission
+from shared.clob_executor import CancelSubmission, ClobExecutor, OrderSubmission
 
 from .monitor_types import FocusSnapshot, LogBuffer, PaperTrade, TriggerRecord, format_market_label
 from .poller import SingleMatchPoller
@@ -79,6 +86,8 @@ class TradeManager:
         self._mode_label = "real" if trade_mode == "live" else "paper"
         self._executor: ClobExecutor | None = None
         self._last_live_order_ts: float | None = None
+        self._last_balance_reconcile_ts: datetime | None = None
+        self._last_stale_sweep_ts: datetime | None = None
         self._stop: asyncio.Event | None = None
         self._tasks: list[asyncio.Task] = []
 
@@ -95,6 +104,10 @@ class TradeManager:
     async def start(self) -> None:
         if self._stop is None:
             self._stop = asyncio.Event()
+        if self._trade_mode == "live":
+            now = datetime.now(tz=timezone.utc)
+            self._sweep_stale_open_positions(now)
+            self._last_stale_sweep_ts = now
         self._tasks = [asyncio.create_task(self._trade_loop())]
         if self._trade_mode == "live":
             self._tasks.append(asyncio.create_task(self._reconcile_open_orders_loop()))
@@ -155,6 +168,52 @@ class TradeManager:
             last_gamma_update=None,
         )
 
+    @staticmethod
+    def _is_delayed_status(status: str | None) -> bool:
+        return (status or "").strip().lower() == "delayed"
+
+    @staticmethod
+    def _attempt_is_delayed(attempt: OrderAttempt) -> bool:
+        if TradeManager._is_delayed_status(attempt.external_status):
+            return True
+        raw = attempt.raw_json if isinstance(attempt.raw_json, dict) else {}
+        nested = raw.get("response") if isinstance(raw.get("response"), dict) else {}
+        return TradeManager._is_delayed_status(nested.get("status") or raw.get("status"))
+
+    def _delayed_retry_cooldown_seconds(self, *, for_entry: bool) -> float:
+        base = max(float(settings.delayed_retry_cooldown_seconds), 0.0)
+        if for_entry:
+            return max(base, float(settings.live_min_seconds_between_orders))
+        return base
+
+    def _delayed_retry_ready(self, trade: PaperTrade, now: datetime, *, for_entry: bool) -> bool:
+        if trade.delayed_retries >= max(int(settings.delayed_max_retries), 0):
+            return False
+        age_seconds = (now - trade.entry_ts).total_seconds()
+        if age_seconds < float(settings.delayed_grace_seconds):
+            return False
+        if trade.last_retry_ts is None:
+            return True
+        delta = (now - trade.last_retry_ts).total_seconds()
+        return delta >= self._delayed_retry_cooldown_seconds(for_entry=for_entry)
+
+    @staticmethod
+    def _merge_dict(base: dict | None, extra: dict) -> dict:
+        payload = dict(base or {})
+        payload.update(extra)
+        return payload
+
+    def _cancel_existing_order(self, order_id: str | None) -> CancelSubmission:
+        if not order_id or not self._executor:
+            return CancelSubmission(
+                success=False,
+                canceled=[],
+                not_canceled={order_id or "": "missing_order_id"},
+                error_msg="missing_order_id",
+                raw={"order_id": order_id, "reason": "missing_order_id"},
+            )
+        return self._executor.cancel_order(order_id)
+
     def _ensure_trade_for_position(self, position: Position) -> PaperTrade | None:
         pm_fixture = next(
             (
@@ -207,6 +266,166 @@ class TradeManager:
                 return pm_fix
         return self._pm_fixture  # fallback to primary
 
+    def _reconcile_open_trade_balances(self, now: datetime) -> None:
+        if self._trade_mode != "live" or not self._executor:
+            return
+        with self._open_trades_lock:
+            open_trades = list(self._open_trades.values())
+        if not open_trades:
+            return
+        eps = max(float(getattr(settings, "live_share_step", 0.0001) or 0.0001), 0.000001)
+        to_close: list[str] = []
+        with SessionLocal() as db:
+            for trade in open_trades:
+                if not trade.db_position_id or not trade.token_id:
+                    continue
+                position = db.get(Position, trade.db_position_id)
+                if not position or position.closed_at is not None:
+                    continue
+                try:
+                    balance, bal_raw = self._executor.get_conditional_balance(trade.token_id)
+                except Exception:
+                    continue
+                if balance is None:
+                    continue
+                pm_fixture = next(
+                    (
+                        fix
+                        for fix in self._pm_fixtures
+                        if position.pm_fixture_id and str(fix.id) == str(position.pm_fixture_id)
+                    ),
+                    self._pm_fixture,
+                )
+                snapshot = self._build_stub_snapshot(trade, now)
+                if balance <= eps:
+                    position.closed_at = now
+                    position.status = "closed"
+                    position.exit_reason = position.exit_reason or "balance_reconciled"
+                    position.hold_seconds = (now - position.opened_at).total_seconds()
+                    db.add(position)
+                    event = self._build_trade_event(
+                        event_type="EXIT",
+                        now=now,
+                        mapping=self._mapping,
+                        pm_fixture=pm_fixture,
+                        snapshot=snapshot,
+                        side=trade.side,
+                        reason=position.exit_reason,
+                        details="manual_or_external_close_reconciled",
+                        position_id=str(position.id),
+                        external_order_id=position.external_order_id,
+                        external_status=position.external_status,
+                        raw_json={"balance": balance, "balance_raw": bal_raw},
+                    )
+                    db.add(event)
+                    to_close.append(trade.key)
+                    continue
+                if abs(balance - trade.quantity) > eps:
+                    old_qty = trade.quantity
+                    trade.quantity = balance
+                    position.quantity = balance
+                    db.add(position)
+                    event = self._build_trade_event(
+                        event_type="EXIT_RETRY",
+                        now=now,
+                        mapping=self._mapping,
+                        pm_fixture=pm_fixture,
+                        snapshot=snapshot,
+                        side=trade.side,
+                        reason="balance_sync",
+                        details=f"qty_sync {old_qty:.2f}->{balance:.2f}",
+                        position_id=str(position.id),
+                        external_order_id=position.external_order_id,
+                        external_status=position.external_status,
+                        raw_json={"balance": balance, "balance_raw": bal_raw},
+                    )
+                    db.add(event)
+            db.commit()
+        if to_close:
+            with self._open_trades_lock:
+                for key in to_close:
+                    trade = self._open_trades.get(key)
+                    if trade:
+                        trade.status = "closed"
+                        self._open_trades.pop(key, None)
+
+    def _sweep_stale_open_positions(self, now: datetime) -> None:
+        if self._trade_mode != "live" or not self._executor:
+            return
+        eps = max(float(getattr(settings, "live_share_step", 0.0001) or 0.0001), 0.000001)
+        with SessionLocal() as db:
+            positions = (
+                db.execute(
+                    select(Position)
+                    .where(Position.mapping_id == self._mapping.id)
+                    .where(Position.mode == self._mode_label)
+                    .where(Position.closed_at.is_(None))
+                )
+                .scalars()
+                .all()
+            )
+            for position in positions:
+                pm_fixture = next(
+                    (
+                        fix
+                        for fix in self._pm_fixtures
+                        if position.pm_fixture_id and str(fix.id) == str(position.pm_fixture_id)
+                    ),
+                    self._pm_fixture,
+                )
+                if not _fixture_is_resolved(pm_fixture):
+                    continue
+                trade = self._ensure_trade_for_position(position)
+                if not trade or not trade.token_id:
+                    continue
+                try:
+                    balance, bal_raw = self._executor.get_conditional_balance(trade.token_id)
+                except Exception:
+                    continue
+                if balance is None:
+                    continue
+                snapshot = self._build_stub_snapshot(trade, now)
+                if balance <= eps:
+                    position.closed_at = now
+                    position.status = "closed"
+                    position.exit_reason = "stale_reconciled"
+                    position.hold_seconds = (now - position.opened_at).total_seconds()
+                    db.add(position)
+                    event = self._build_trade_event(
+                        event_type="EXIT",
+                        now=now,
+                        mapping=self._mapping,
+                        pm_fixture=pm_fixture,
+                        snapshot=snapshot,
+                        side=trade.side,
+                        reason="stale_reconciled",
+                        details="resolved_market_balance_zero",
+                        position_id=str(position.id),
+                        external_order_id=position.external_order_id,
+                        external_status=position.external_status,
+                        raw_json={"balance": balance, "balance_raw": bal_raw},
+                    )
+                    db.add(event)
+                    with self._open_trades_lock:
+                        self._open_trades.pop(trade.key, None)
+                else:
+                    event = self._build_trade_event(
+                        event_type="EXIT_ERROR",
+                        now=now,
+                        mapping=self._mapping,
+                        pm_fixture=pm_fixture,
+                        snapshot=snapshot,
+                        side=trade.side,
+                        reason="stale_position_balance_nonzero",
+                        details=f"resolved_market_shares={balance:.2f}",
+                        position_id=str(position.id),
+                        external_order_id=position.external_order_id,
+                        external_status=position.external_status,
+                        raw_json={"balance": balance, "balance_raw": bal_raw},
+                    )
+                    db.add(event)
+            db.commit()
+
     async def _trade_loop(self) -> None:
         while self._stop and not self._stop.is_set():
             try:
@@ -215,6 +434,21 @@ class TradeManager:
                     await asyncio.sleep(0.5)
                     continue
                 now = datetime.now(tz=timezone.utc)
+                if self._trade_mode == "live":
+                    if (
+                        self._last_balance_reconcile_ts is None
+                        or (now - self._last_balance_reconcile_ts).total_seconds()
+                        >= float(settings.balance_poll_interval_seconds)
+                    ):
+                        self._reconcile_open_trade_balances(now)
+                        self._last_balance_reconcile_ts = now
+                    if (
+                        self._last_stale_sweep_ts is None
+                        or (now - self._last_stale_sweep_ts).total_seconds()
+                        >= float(settings.stale_position_sweep_seconds)
+                    ):
+                        self._sweep_stale_open_positions(now)
+                        self._last_stale_sweep_ts = now
                 fixture_id = str(self._op_fixture.source_id)
 
                 # Trigger detection uses match_winner p_ref (the leading signal)
@@ -470,32 +704,83 @@ class TradeManager:
                 token_id = best.get("token_id")
                 key = _trade_key(mapping, pm_fixture, side)
                 with self._open_trades_lock:
-                    already_open = key in self._open_trades
+                    existing_trade = self._open_trades.get(key)
+                    already_open = existing_trade is not None
                 if already_open:
-                    trigger_record.entry_done = True
-                    self._trade_buffer.add(
-                        _format_trade_line(
-                            event="ENTRY_SKIP",
-                            match=snapshot.match,
-                            market_type=snapshot.market_type,
-                            game_number=snapshot.game_number,
-                            side=side,
-                            details="skip already_open",
-                        )
+                    can_retry_delayed = (
+                        self._trade_mode == "live"
+                        and existing_trade is not None
+                        and existing_trade.status == "submitted"
+                        and self._is_delayed_status(existing_trade.external_status)
+                        and entry["actionable"]
+                        and self._delayed_retry_ready(existing_trade, now, for_entry=True)
                     )
-                    with SessionLocal() as db:
-                        event = self._build_trade_event(
-                            event_type="ENTRY_SKIP",
-                            now=now,
+                    if can_retry_delayed:
+                        retried = await self._retry_delayed_live_entry(
                             mapping=mapping,
                             pm_fixture=pm_fixture,
                             snapshot=snapshot,
                             side=side,
-                            reason="already_open",
-                            details="skip already_open",
+                            token_id=token_id,
+                            entry=entry,
+                            size_available=float(entry["size_available"] or 0.0),
+                            quantity=(
+                                min(
+                                    PROBE_QUANTITY,
+                                    float(entry["size_available"] or 0.0),
+                                )
+                                if float(entry["size_available"] or 0.0)
+                                else PROBE_QUANTITY
+                            ),
+                            now=now,
+                            trade=existing_trade,
+                            alpha=float(best["alpha"]),
+                            p_ref=best["p_ref"],
                         )
-                        db.add(event)
-                        db.commit()
+                        if retried:
+                            trigger_record.entry_done = True
+                    else:
+                        trigger_record.entry_done = True
+                        details = "skip already_open"
+                        reason = "already_open"
+                        if (
+                            self._trade_mode == "live"
+                            and existing_trade is not None
+                            and existing_trade.status == "submitted"
+                            and self._is_delayed_status(existing_trade.external_status)
+                        ):
+                            reason = "delayed_grace_or_cooldown"
+                            details = "skip delayed_wait"
+                        self._trade_buffer.add(
+                            _format_trade_line(
+                                event="ENTRY_SKIP",
+                                match=snapshot.match,
+                                market_type=snapshot.market_type,
+                                game_number=snapshot.game_number,
+                                side=side,
+                                details=details,
+                            )
+                        )
+                        with SessionLocal() as db:
+                            event = self._build_trade_event(
+                                event_type="ENTRY_SKIP",
+                                now=now,
+                                mapping=mapping,
+                                pm_fixture=pm_fixture,
+                                snapshot=snapshot,
+                                side=side,
+                                reason=reason,
+                                details=details,
+                                raw_json=(
+                                    {
+                                        "delayed_retries": existing_trade.delayed_retries,
+                                    }
+                                    if existing_trade is not None
+                                    else {}
+                                ),
+                            )
+                            db.add(event)
+                            db.commit()
                 elif entry["actionable"]:
                     size_available = float(entry["size_available"] or 0.0)
                     quantity = min(PROBE_QUANTITY, size_available) if size_available else PROBE_QUANTITY
@@ -1040,6 +1325,371 @@ class TradeManager:
         )
         return trade
 
+    async def _retry_delayed_live_entry(
+        self,
+        *,
+        mapping: Mapping,
+        pm_fixture: Fixture,
+        snapshot: FocusSnapshot,
+        side: str,
+        token_id: str | None,
+        entry: dict,
+        size_available: float,
+        quantity: float,
+        now: datetime,
+        trade: PaperTrade,
+        alpha: float,
+        p_ref: float | None,
+    ) -> bool:
+        if not self._executor or not trade.db_position_id or not token_id:
+            return False
+        limit_price = float(entry.get("limit_price") or entry.get("avg_fill") or 0.0)
+        if limit_price <= 0:
+            return False
+        if quantity > settings.live_max_shares_per_order:
+            quantity = settings.live_max_shares_per_order
+        max_usd = settings.live_max_usd_per_order
+        if max_usd > 0 and (limit_price * quantity) > max_usd:
+            quantity = max_usd / limit_price if limit_price else 0.0
+        buy_usdc = _quantize_usdc(limit_price * quantity)
+        if buy_usdc <= 0:
+            return False
+        if settings.live_require_allowance_check:
+            allowance = self._executor.check_allowance_buy(buy_usdc)
+            if not allowance.ok:
+                return False
+        with SessionLocal() as db:
+            position = db.get(Position, trade.db_position_id)
+            if not position or position.closed_at is not None:
+                return False
+            pending_attempt = db.execute(
+                select(OrderAttempt)
+                .where(OrderAttempt.position_id == position.id)
+                .where(OrderAttempt.phase == "entry")
+                .where(OrderAttempt.finalized_at.is_(None))
+                .order_by(OrderAttempt.attempt_seq.desc())
+            ).scalars().first()
+            if not pending_attempt or not self._attempt_is_delayed(pending_attempt):
+                return False
+            cancel_response = self._cancel_existing_order(pending_attempt.external_order_id)
+            pending_attempt.finalized_at = now
+            pending_attempt.final_state = "cancelled"
+            pending_attempt.final_reason = "superseded_delayed"
+            pending_attempt.raw_json = self._merge_dict(
+                pending_attempt.raw_json if isinstance(pending_attempt.raw_json, dict) else {},
+                {
+                    "superseded_delayed": True,
+                    "cancel_response": cancel_response.raw,
+                },
+            )
+            response = self._executor.place_fak_order(
+                token_id=token_id,
+                side="BUY",
+                price=limit_price,
+                amount=buy_usdc,
+                tick_size=snapshot.tick_size,
+            )
+            if not response.success or response.error_msg:
+                position.status = "cancelled"
+                position.closed_at = now
+                position.exit_reason = "entry_retry_submit_failed"
+                db.add(position)
+                db.add(pending_attempt)
+                event = self._build_trade_event(
+                    event_type="ENTRY_ERROR",
+                    now=now,
+                    mapping=mapping,
+                    pm_fixture=pm_fixture,
+                    snapshot=snapshot,
+                    side=side,
+                    reason=response.error_msg or "retry_submit_failed",
+                    details="entry_retry_submit_failed",
+                    position_id=str(position.id),
+                    external_order_id=response.order_id,
+                    external_status=response.status,
+                    raw_json={
+                        "retry": True,
+                        "cancel_response": cancel_response.raw,
+                        "submit_response": response.raw,
+                    },
+                )
+                db.add(event)
+                db.commit()
+                with self._open_trades_lock:
+                    self._open_trades.pop(trade.key, None)
+                return False
+            side_label = "A" if side == "buy_a" else "B"
+            entry_raw = {
+                "mapping_id": str(mapping.id),
+                "market_id": str(pm_fixture.id),
+                "token_id": token_id,
+                "market_type": snapshot.market_type,
+                "game_number": snapshot.game_number,
+                "side": side_label,
+                "trigger_type": trade.trigger_type,
+                "trigger_ts": trade.trigger_ts.isoformat() if trade.trigger_ts else None,
+                "entry_ts": trade.entry_ts.isoformat(),
+                "entry_price": float(entry.get("avg_fill") or limit_price),
+                "limit_price": limit_price,
+                "size_available": size_available,
+                "quantity": quantity,
+                "buy_usdc": buy_usdc,
+                "net_edge": entry.get("net_edge"),
+                "p_ref_entry": p_ref,
+                "external_order_id": response.order_id,
+                "external_status": response.status,
+            }
+            position.entry_price = float(entry.get("avg_fill") or limit_price)
+            position.entry_p_ref = p_ref
+            position.entry_alpha = float(alpha or 0.0)
+            position.entry_edge = entry.get("net_edge")
+            position.quantity = quantity
+            position.status = "submitted"
+            position.external_order_id = response.order_id
+            position.external_status = response.status
+            position.raw_json = entry_raw
+            db.add(position)
+            new_attempt = OrderAttempt(
+                position_id=position.id,
+                run_id=self._run_id,
+                mode=self._mode_label,
+                phase="entry",
+                side="BUY",
+                token_id=token_id,
+                attempt_seq=self._next_attempt_seq(db, position.id, "entry"),
+                submitted_at=now,
+                limit_price=limit_price,
+                requested_size=quantity,
+                external_order_id=response.order_id,
+                external_status=response.status,
+                raw_json={
+                    "response": response.raw,
+                    "buy_usdc": buy_usdc,
+                    "retry": True,
+                    "superseded_attempt_id": str(pending_attempt.id),
+                    "cancel_response": cancel_response.raw,
+                },
+            )
+            db.add(new_attempt)
+            event = self._build_trade_event(
+                event_type="ENTRY_RETRY",
+                now=now,
+                mapping=mapping,
+                pm_fixture=pm_fixture,
+                snapshot=snapshot,
+                side=side,
+                reason="retry_delayed",
+                details=f"status={response.status or 'unknown'}",
+                position_id=str(position.id),
+                quantity=quantity,
+                limit_price=limit_price,
+                avg_fill_price=float(entry.get("avg_fill") or limit_price),
+                size_available=size_available,
+                net_edge=entry.get("net_edge"),
+                external_order_id=response.order_id,
+                external_status=response.status,
+                raw_json={
+                    "cancel_response": cancel_response.raw,
+                    "submit_response": response.raw,
+                    "retry_count": trade.delayed_retries + 1,
+                },
+            )
+            db.add(event)
+            db.commit()
+            trade.entry_price = float(entry.get("avg_fill") or limit_price)
+            trade.limit_price = limit_price
+            trade.size_available = size_available
+            trade.quantity = quantity
+            trade.alpha = float(alpha or 0.0)
+            trade.net_edge = entry.get("net_edge")
+            trade.p_ref_entry = p_ref
+            trade.status = "submitted"
+            trade.external_order_id = response.order_id
+            trade.external_status = response.status
+            trade.delayed_retries += 1
+            trade.last_retry_ts = now
+            self._last_live_order_ts = now.timestamp()
+            self._trade_buffer.add(
+                _format_trade_line(
+                    event="ENTRY_RETRY",
+                    match=snapshot.match,
+                    market_type=snapshot.market_type,
+                    game_number=snapshot.game_number,
+                    side=side,
+                    details=f"retry={trade.delayed_retries} @ {trade.entry_price:.3f}",
+                )
+            )
+            return True
+
+    def _retry_delayed_live_exit(
+        self,
+        *,
+        db: SessionLocal,
+        attempt: OrderAttempt,
+        position: Position,
+        trade: PaperTrade,
+        now: datetime,
+        snapshot: FocusSnapshot,
+        pm_fixture: Fixture,
+    ) -> bool:
+        if not self._delayed_retry_ready(trade, now, for_entry=False):
+            return False
+        if not self._attempt_is_delayed(attempt):
+            return False
+        cancel_response = self._cancel_existing_order(attempt.external_order_id)
+        attempt.finalized_at = now
+        attempt.final_state = "cancelled"
+        attempt.final_reason = "superseded_delayed"
+        attempt.raw_json = self._merge_dict(
+            attempt.raw_json if isinstance(attempt.raw_json, dict) else {},
+            {
+                "superseded_delayed": True,
+                "cancel_response": cancel_response.raw,
+            },
+        )
+        position.external_order_id = None
+        position.external_status = "retry_pending"
+        db.add(position)
+        trade.status = "open"
+        trade.external_order_id = None
+        trade.external_status = None
+        trade.delayed_retries += 1
+        trade.last_retry_ts = now
+        event = self._build_trade_event(
+            event_type="EXIT_RETRY",
+            now=now,
+            mapping=self._mapping,
+            pm_fixture=pm_fixture,
+            snapshot=snapshot,
+            side=trade.side,
+            reason="retry_delayed",
+            details=f"retry={trade.delayed_retries}",
+            position_id=str(position.id),
+            external_order_id=attempt.external_order_id,
+            external_status=attempt.external_status,
+            raw_json={"cancel_response": cancel_response.raw},
+        )
+        db.add(event)
+        self._trade_buffer.add(
+            _format_trade_line(
+                event="EXIT_RETRY",
+                match=snapshot.match,
+                market_type=snapshot.market_type,
+                game_number=snapshot.game_number,
+                side=trade.side,
+                details=f"retry={trade.delayed_retries}",
+            )
+        )
+        db.add(attempt)
+        db.commit()
+        return True
+
+    def _cancel_and_reprice_exit(
+        self,
+        *,
+        db: SessionLocal,
+        attempt: OrderAttempt,
+        position: Position,
+        trade: PaperTrade,
+        now: datetime,
+        snapshot: FocusSnapshot,
+        pm_fixture: Fixture,
+        requested: float,
+        eps: float,
+        filled_qty: float | None,
+    ) -> bool:
+        cancel_response = self._cancel_existing_order(attempt.external_order_id)
+        balance = None
+        bal_raw: dict | None = None
+        if self._executor and attempt.token_id:
+            try:
+                balance, bal_raw = self._executor.get_conditional_balance(attempt.token_id)
+            except Exception:
+                balance, bal_raw = None, None
+        if balance is not None and balance <= eps:
+            attempt.finalized_at = now
+            attempt.final_state = "confirmed"
+            attempt.final_reason = "balance_zero"
+            if requested > 0:
+                attempt.matched_size = requested
+            attempt.raw_json = self._merge_dict(
+                attempt.raw_json if isinstance(attempt.raw_json, dict) else {},
+                {
+                    "cancel_response": cancel_response.raw,
+                    "balance": balance,
+                    "balance_raw": bal_raw,
+                },
+            )
+            position.closed_at = now
+            position.exit_reason = attempt.raw_json.get("exit_reason", "exit")
+            position.exit_price = attempt.limit_price
+            position.hold_seconds = (now - position.opened_at).total_seconds()
+            db.add(position)
+            event = self._build_trade_event(
+                event_type="EXIT",
+                now=now,
+                mapping=self._mapping,
+                pm_fixture=pm_fixture,
+                snapshot=snapshot,
+                side=trade.side,
+                reason=position.exit_reason,
+                details="cancel_reprice_balance_zero",
+                position_id=str(position.id),
+                exit_price=position.exit_price,
+                external_order_id=attempt.external_order_id,
+                external_status=attempt.external_status,
+                raw_json={"cancel_response": cancel_response.raw, "balance": balance, "balance_raw": bal_raw},
+            )
+            db.add(event)
+            trade.status = "closed"
+            with self._open_trades_lock:
+                self._open_trades.pop(trade.key, None)
+            db.add(attempt)
+            db.commit()
+            return True
+
+        remaining = balance if balance is not None else requested
+        if filled_qty is not None and requested > 0:
+            remaining = min(remaining, max(requested - filled_qty, 0.0))
+        attempt.finalized_at = now
+        attempt.final_state = "failed"
+        attempt.final_reason = "cancel_reprice"
+        if requested > 0 and remaining >= 0:
+            maybe_filled = max(requested - remaining, 0.0)
+            if maybe_filled > eps:
+                attempt.matched_size = maybe_filled
+        attempt.raw_json = self._merge_dict(
+            attempt.raw_json if isinstance(attempt.raw_json, dict) else {},
+            {
+                "cancel_response": cancel_response.raw,
+                "balance": balance,
+                "balance_raw": bal_raw,
+                "filled_qty": filled_qty,
+            },
+        )
+        trade.quantity = max(remaining, 0.0)
+        position.quantity = max(remaining, 0.0)
+        trade.status = "open"
+        db.add(position)
+        retry_event = self._build_trade_event(
+            event_type="EXIT_RETRY",
+            now=now,
+            mapping=self._mapping,
+            pm_fixture=pm_fixture,
+            snapshot=snapshot,
+            side=trade.side,
+            reason="cancel_reprice",
+            details=f"remaining={max(remaining, 0.0):.2f}",
+            position_id=str(position.id),
+            external_order_id=attempt.external_order_id,
+            external_status=attempt.external_status,
+            raw_json={"cancel_response": cancel_response.raw, "balance": balance, "balance_raw": bal_raw},
+        )
+        db.add(retry_event)
+        db.add(attempt)
+        db.commit()
+        return True
+
     def _submit_live_exit(
         self,
         *,
@@ -1058,6 +1708,9 @@ class TradeManager:
         if bid is None or bid <= 0:
             return False
         sell_shares = _quantize_market_shares(trade.quantity)
+        degraded_chunk_mode = False
+        degraded_attempt_count: int | None = None
+        exit_attempt_count = 0
         if sell_shares <= 0:
             self._trade_buffer.add(
                 _format_trade_line(
@@ -1090,32 +1743,41 @@ class TradeManager:
                     .where(OrderAttempt.position_id == trade.db_position_id)
                     .where(OrderAttempt.phase == "exit")
                 )
+                exit_attempt_count = int(attempt_count or 0)
                 if attempt_count is not None and attempt_count >= settings.exit_max_attempts:
-                    self._trade_buffer.add(
-                        _format_trade_line(
-                            event="BLOCKED",
-                            match=snapshot.match,
-                            market_type=snapshot.market_type,
-                            game_number=snapshot.game_number,
-                            side=trade.side,
-                            details="exit_max_attempts_exceeded",
+                    degraded_chunk_mode = True
+                    degraded_attempt_count = int(attempt_count)
+                    chunk_shares = _compute_degraded_exit_shares(
+                        trade.quantity,
+                        settings.exit_degraded_chunk_fraction,
+                    )
+                    if chunk_shares <= 0:
+                        self._trade_buffer.add(
+                            _format_trade_line(
+                                event="BLOCKED",
+                                match=snapshot.match,
+                                market_type=snapshot.market_type,
+                                game_number=snapshot.game_number,
+                                side=trade.side,
+                                details="exit_degraded_chunk_zero",
+                            )
                         )
-                    )
-                    event = self._build_trade_event(
-                        event_type="BLOCKED",
-                        now=now,
-                        mapping=mapping,
-                        pm_fixture=pm_fixture,
-                        snapshot=snapshot,
-                        side=trade.side,
-                        reason="exit_max_attempts_exceeded",
-                        details="exit_max_attempts_exceeded",
-                        position_id=trade.db_position_id,
-                        raw_json={"attempt_count": attempt_count},
-                    )
-                    db.add(event)
-                    db.commit()
-                    return False
+                        event = self._build_trade_event(
+                            event_type="BLOCKED",
+                            now=now,
+                            mapping=mapping,
+                            pm_fixture=pm_fixture,
+                            snapshot=snapshot,
+                            side=trade.side,
+                            reason="exit_degraded_chunk_zero",
+                            details="exit_degraded_chunk_zero",
+                            position_id=trade.db_position_id,
+                            raw_json={"attempt_count": attempt_count},
+                        )
+                        db.add(event)
+                        db.commit()
+                        return False
+                    sell_shares = min(sell_shares, chunk_shares)
                 last_submitted = db.scalar(
                     select(func.max(OrderAttempt.submitted_at))
                     .where(OrderAttempt.position_id == trade.db_position_id)
@@ -1125,6 +1787,12 @@ class TradeManager:
                     delta_seconds = (now - last_submitted).total_seconds()
                     if delta_seconds < settings.exit_retry_cooldown_seconds:
                         return False
+        limit_price = _compute_exit_limit_price(
+            bid=bid,
+            tick_size=snapshot.tick_size,
+            attempt_count=exit_attempt_count,
+            exit_reason=exit_reason,
+        )
         if settings.live_require_allowance_check:
             allowance = self._executor.check_allowance_sell(trade.token_id, sell_shares)
             if not allowance.ok:
@@ -1154,10 +1822,10 @@ class TradeManager:
                     db.commit()
                 return False
 
-        response = self._executor.place_fak_order(
+        response = self._executor.place_gtc_order(
             token_id=trade.token_id,
             side="SELL",
-            price=bid,
+            price=limit_price,
             amount=sell_shares,
             tick_size=snapshot.tick_size,
         )
@@ -1192,7 +1860,19 @@ class TradeManager:
 
         trade.external_order_id = response.order_id
         trade.external_status = response.status
+        trade.limit_price = limit_price
         trade.status = "exit_submitted"
+        if degraded_chunk_mode:
+            self._trade_buffer.add(
+                _format_trade_line(
+                    event="EXIT_RETRY",
+                    match=snapshot.match,
+                    market_type=snapshot.market_type,
+                    game_number=snapshot.game_number,
+                    side=trade.side,
+                    details=f"degraded_chunk={sell_shares:.2f}",
+                )
+            )
         with SessionLocal() as db:
             if trade.db_position_id:
                 attempt = OrderAttempt(
@@ -1204,14 +1884,20 @@ class TradeManager:
                     token_id=trade.token_id or "",
                     attempt_seq=self._next_attempt_seq(db, trade.db_position_id, "exit"),
                     submitted_at=now,
-                    limit_price=bid,
+                    limit_price=limit_price,
                     requested_size=sell_shares,
                     external_order_id=response.order_id,
                     external_status=response.status,
                     raw_json={
                         "exit_reason": exit_reason,
-                        "limit_price": bid,
+                        "limit_price": limit_price,
+                        "bid_at_submit": bid,
                         "sell_shares": sell_shares,
+                        "order_type": "GTC",
+                        "attempt_count": exit_attempt_count,
+                        "degraded_chunk_mode": degraded_chunk_mode,
+                        "degraded_attempt_count": degraded_attempt_count,
+                        "degraded_chunk_fraction": settings.exit_degraded_chunk_fraction,
                         "response": response.raw,
                     },
                 )
@@ -1224,10 +1910,24 @@ class TradeManager:
                 snapshot=snapshot,
                 side=trade.side,
                 reason="exit",
-                details=f"@ {bid:.3f}",
+                details=(
+                    f"@ {limit_price:.3f}"
+                    if not degraded_chunk_mode
+                    else f"@ {limit_price:.3f} chunk={sell_shares:.2f}"
+                ),
                 external_order_id=response.order_id,
                 external_status=response.status,
-                raw_json=response.raw,
+                raw_json={
+                    **(response.raw if isinstance(response.raw, dict) else {"raw": response.raw}),
+                    "order_type": "GTC",
+                    "attempt_count": exit_attempt_count,
+                    "bid_at_submit": bid,
+                    "limit_price": limit_price,
+                    "degraded_chunk_mode": degraded_chunk_mode,
+                    "degraded_attempt_count": degraded_attempt_count,
+                    "degraded_chunk_fraction": settings.exit_degraded_chunk_fraction,
+                    "degraded_sell_shares": sell_shares,
+                },
             )
             db.add(event)
             db.commit()
@@ -1396,6 +2096,12 @@ class TradeManager:
         attempt.last_checked_at = now
         eps = max(float(getattr(settings, "live_share_step", 0.0001) or 0.0001), 0.000001)
         requested = float(attempt.requested_size or trade.quantity or 0.0)
+        is_gtc = _is_gtc_exit_attempt(attempt)
+        timeout_seconds = (
+            float(settings.exit_gtc_reprice_seconds)
+            if is_gtc
+            else float(settings.exit_order_not_found_seconds)
+        )
         if not attempt.external_order_id:
             if self._user_ws and settings.user_ws_enabled and attempt.token_id:
                 ws_order = await self._user_ws.get_latest_order_by_asset(attempt.token_id, attempt.side)
@@ -1409,7 +2115,7 @@ class TradeManager:
             if _is_order_not_found_timeout(
                 attempt.submitted_at,
                 now,
-                settings.exit_order_not_found_seconds,
+                timeout_seconds,
             ):
                 if attempt.final_reason != "order_not_found_timeout":
                     attempt.final_reason = "order_not_found_timeout"
@@ -1462,11 +2168,11 @@ class TradeManager:
                         snapshot=snapshot,
                         side=trade.side,
                         reason="order_not_found",
-                        details=f"timeout={settings.exit_order_not_found_seconds:.0f}s",
+                        details=f"timeout={timeout_seconds:.0f}s",
                         position_id=str(position.id),
                         external_order_id=attempt.external_order_id,
                         external_status=attempt.external_status,
-                        raw_json={"timeout_seconds": settings.exit_order_not_found_seconds},
+                        raw_json={"timeout_seconds": timeout_seconds},
                     )
                     db.add(event)
                     if balance is not None and balance > eps and trade.status != "open":
@@ -1559,7 +2265,7 @@ class TradeManager:
             if _is_order_not_found_timeout(
                 attempt.submitted_at,
                 now,
-                settings.exit_order_not_found_seconds,
+                timeout_seconds,
             ):
                 if attempt.final_reason != "order_not_found_timeout":
                     attempt.final_reason = "order_not_found_timeout"
@@ -1626,11 +2332,11 @@ class TradeManager:
                         snapshot=snapshot,
                         side=trade.side,
                         reason="order_not_found",
-                        details=f"timeout={settings.exit_order_not_found_seconds:.0f}s",
+                        details=f"timeout={timeout_seconds:.0f}s",
                         position_id=str(position.id),
                         external_order_id=attempt.external_order_id,
                         external_status=attempt.external_status,
-                        raw_json={"timeout_seconds": settings.exit_order_not_found_seconds},
+                        raw_json={"timeout_seconds": timeout_seconds},
                     )
                     db.add(event)
                     if balance is not None and balance > eps and trade.status != "open":
@@ -1702,6 +2408,40 @@ class TradeManager:
         status = response.get("status", "")
         attempt.external_status = status
         filled_qty = _parse_filled_quantity(response)
+        if (
+            is_gtc
+            and not self._is_delayed_status(status)
+            and status not in {"filled", "canceled", "cancelled", "rejected", "partially_filled"}
+            and (now - attempt.submitted_at).total_seconds() >= float(settings.exit_gtc_reprice_seconds)
+        ):
+            retried = self._cancel_and_reprice_exit(
+                db=db,
+                attempt=attempt,
+                position=position,
+                trade=trade,
+                now=now,
+                snapshot=snapshot,
+                pm_fixture=pm_fixture,
+                requested=requested,
+                eps=eps,
+                filled_qty=filled_qty,
+            )
+            if retried:
+                return
+        if self._is_delayed_status(status):
+            age_seconds = (now - attempt.submitted_at).total_seconds()
+            if age_seconds >= float(settings.delayed_grace_seconds):
+                retried = self._retry_delayed_live_exit(
+                    db=db,
+                    attempt=attempt,
+                    position=position,
+                    trade=trade,
+                    now=now,
+                    snapshot=snapshot,
+                    pm_fixture=pm_fixture,
+                )
+                if retried:
+                    return
         if filled_qty is None and status in {"filled", "partially_filled"}:
             # Some responses omit size_matched; treat missing as unknown rather than crashing.
             filled_qty = 0.0
@@ -1939,10 +2679,24 @@ class TradeManager:
             if trade.status not in {"open", "confirmed"}:
                 continue
             p_ref, bid = _select_p_ref_and_bid(trade.side, snapshot)
-            exit_signal = compute_exit_signal(p_ref, bid, settings.exit_epsilon) if not ended else True
-            if not exit_signal:
+
+            # -- Stop-loss guards (checked before convergence) --
+            reason: str | None = None
+            if ended:
+                reason = "market_ended"
+            elif settings.stop_thesis_death_enabled and check_thesis_death(
+                p_ref, trade.entry_price
+            ):
+                reason = "thesis_death"
+            elif settings.stop_hard_enabled and check_hard_stop(
+                bid, trade.entry_price, settings.stop_hard_pct
+            ):
+                reason = "hard_stop"
+            elif compute_exit_signal(p_ref, bid, settings.exit_epsilon):
+                reason = "convergence"
+
+            if reason is None:
                 continue
-            reason = "market_ended" if ended else "convergence"
             if self._trade_mode == "live":
                 submitted = self._submit_live_exit(
                     mapping=mapping,
@@ -2172,6 +2926,11 @@ def _resolve_books(
     return books
 
 
+def _bid_depth_usd(bids: list[tuple[float, float]]) -> float:
+    """Total USD liquidity on the bid side: sum(price * size) for each level."""
+    return sum(price * size for price, size in bids)
+
+
 def _build_entry_candidate(
     side: str,
     p_ref: float | None,
@@ -2185,6 +2944,16 @@ def _build_entry_candidate(
     ask = book.best_ask
     if bid is None or ask is None:
         return None
+
+    # Gate: skip markets where bid-side liquidity is too thin to exit
+    bid_usd = _bid_depth_usd(book.bids)
+    if bid_usd < settings.min_book_depth_usd:
+        logger.debug(
+            "thin_bids: %s bid depth $%.2f < min $%.2f – skipping",
+            side, bid_usd, settings.min_book_depth_usd,
+        )
+        return None
+
     spread = max(ask - bid, 0.0)
     alpha = compute_alpha_entry(spread, settings.alpha_min, settings.alpha_spread_factor)
     entry = compute_entry_edge(p_ref, book.asks, PROBE_QUANTITY, alpha, tick_size=tick_size or 0.01)
@@ -2239,6 +3008,49 @@ def _parse_float(value: object) -> float | None:
         return None
 
 
+def _effective_tick_size(value: float | None) -> float:
+    tick = _parse_float(value)
+    if tick is None or tick <= 0:
+        return 0.01
+    return tick
+
+
+def _quantize_price_to_tick(price: float, tick_size: float) -> float:
+    if price <= 0:
+        return 0.0
+    tick = Decimal(str(tick_size if tick_size > 0 else 0.01))
+    rounded = (Decimal(str(price)) / tick).to_integral_value(rounding=ROUND_DOWN) * tick
+    return float(rounded)
+
+
+def _compute_exit_limit_price(
+    *,
+    bid: float,
+    tick_size: float | None,
+    attempt_count: int,
+    exit_reason: str,
+) -> float:
+    tick = _effective_tick_size(tick_size)
+    attempt_num = max(int(attempt_count), 0) + 1
+    if attempt_num <= 2:
+        improve_ticks = 0
+    elif attempt_num <= 4:
+        improve_ticks = 1
+    else:
+        improve_ticks = 2
+    if exit_reason in {"thesis_death", "hard_stop", "market_ended"}:
+        improve_ticks = max(improve_ticks, 1)
+    step_ticks = max(int(settings.exit_price_step_ticks), 1)
+    adjusted = bid - (improve_ticks * step_ticks * tick)
+    bounded = max(adjusted, tick)
+    return _quantize_price_to_tick(bounded, tick)
+
+
+def _is_gtc_exit_attempt(attempt: OrderAttempt) -> bool:
+    raw = attempt.raw_json if isinstance(attempt.raw_json, dict) else {}
+    return str(raw.get("order_type") or "").upper() == "GTC"
+
+
 def _quantize_usdc(value: float) -> float:
     if value <= 0:
         return 0.0
@@ -2249,6 +3061,13 @@ def _quantize_market_shares(value: float) -> float:
     if value <= 0:
         return 0.0
     return float(Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_DOWN))
+
+
+def _compute_degraded_exit_shares(quantity: float, chunk_fraction: float) -> float:
+    if quantity <= 0:
+        return 0.0
+    fraction = min(max(chunk_fraction, 0.0), 1.0)
+    return _quantize_market_shares(quantity * fraction)
 
 
 def _parse_dt(value: str | None) -> datetime | None:
@@ -2264,6 +3083,13 @@ def _is_order_not_found_timeout(
     submitted_at: datetime, now: datetime, timeout_seconds: float
 ) -> bool:
     return (now - submitted_at).total_seconds() > timeout_seconds
+
+
+def _fixture_is_resolved(fixture: Fixture | None) -> bool:
+    if not fixture:
+        return False
+    status = (fixture.status or "").strip().lower()
+    return status in {"finished", "resolved", "settled", "closed", "ended"}
 
 
 def _trigger_key(fixture_id: str, snapshot: FocusSnapshot) -> str:

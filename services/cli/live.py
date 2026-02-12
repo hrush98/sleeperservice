@@ -28,7 +28,7 @@ from shared.config import settings
 from shared.secret_utils import decrypt_age_keyfile
 from shared.db import SessionLocal
 from shared.fixture_state import FixtureStateManager
-from shared.models import Fixture, Mapping
+from shared.models import Fixture, Mapping, Position
 from shared.oddspapi_client import AsyncOddsPapiClient
 from shared.polymarket_client import AsyncPolymarketClient
 from shared.polymarket_user_ws import PolymarketUserWSManager
@@ -271,6 +271,9 @@ def live_command(
 
                 snapshots = poller.get_all_snapshots()
                 perf = poller.get_perf()
+                positions = _get_completed_positions_for_mapping(
+                    str(mapping.id), int(settings.live_positions_limit)
+                )
                 render_layout(
                     layout=layout,
                     snapshots=snapshots,
@@ -283,6 +286,7 @@ def live_command(
                     input_text=input_buffer,
                     pm_question=pm_question,
                     pm_condition_id=pm_condition_id,
+                    positions=positions,
                 )
                 time.sleep(ui_interval)
     finally:
@@ -389,6 +393,27 @@ def _prompt_match_selection(
         )
         league_name = op_fix.league.name if op_fix.league else ""
         return mapping, op_fix, pm_fixtures, league_name
+
+
+def _get_completed_positions_for_mapping(mapping_id: str, limit: int) -> list:
+    """Return recent completed positions (confirmed entry + closed exit)."""
+    with SessionLocal() as db:
+        rows = (
+            db.execute(
+                sa_select(Position)
+                .where(Position.mapping_id == mapping_id)
+                .where(Position.status == "confirmed")
+                .where(Position.closed_at.is_not(None))
+                .where(Position.exit_price.is_not(None))
+                .order_by(
+                    Position.closed_at.desc(),
+                    Position.opened_at.desc(),
+                )
+                .limit(limit)
+            )
+            .scalars().all()
+        )
+        return [r for r in rows]
 
 
 def _resolve_all_markets(db, pm_fixture: Fixture) -> list[Fixture]:
