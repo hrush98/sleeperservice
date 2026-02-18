@@ -3568,6 +3568,14 @@ def _orientation_entry_block_reason(snapshot: FocusSnapshot) -> str | None:
         return "orientation_unlocked"
     if snapshot.orientation_conflict:
         return "orientation_conflict"
+    # Block derived game entries when the match is live — the uniform
+    # derivation produces phantom edges once any game is in progress.
+    if (
+        settings.derived_game_block_inplay
+        and snapshot.p_ref_source == "derived_series"
+        and snapshot.pin_is_inplay
+    ):
+        return "derived_inplay"
     return None
 
 

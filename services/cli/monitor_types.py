@@ -52,6 +52,7 @@ class FocusSnapshot:
     orientation_locked: bool = False
     orientation_source: str | None = None
     orientation_conflict: bool = False
+    pin_is_inplay: bool = False
 
 
 @dataclass

@@ -429,6 +429,12 @@ class SingleMatchPoller:
             cooldown_seconds=15,
         )
 
+        pin_is_inplay = (
+            OddsPapiClient.is_inplay_from_payload(odds_payload)
+            if isinstance(odds_payload, dict)
+            else False
+        )
+
         return FocusSnapshot(
             mapping_id=str(self._mapping.id),
             league=self._league_name,
@@ -458,6 +464,7 @@ class SingleMatchPoller:
             orientation_locked=bool(orientation.get("locked")),
             orientation_source=orientation.get("source"),
             orientation_conflict=orientation_conflict_active,
+            pin_is_inplay=pin_is_inplay,
             edge=edge if isinstance(edge, NetEdgeResult) else NetEdgeResult(None, None, None, None),
             updated_at=now,
             ws_connected=self._ws_manager.is_connected(),

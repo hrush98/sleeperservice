@@ -20,6 +20,30 @@ flowchart TD
   poller -->|focus_only| ws[Polymarket_WS_subscriptions]
   trader -->|focus_only| trading[TradeSignals_and_CLOB_exec]
 
+## 2026-02-14 — Block derived game entries when match is in-play
+
+### What changed
+- Added `pin_is_inplay` field to `FocusSnapshot`, populated from `OddsPapiClient.is_inplay_from_payload` in poller snapshot builder.
+- Added `derived_game_block_inplay` config flag (default `True`).
+- `_orientation_entry_block_reason` now returns `"derived_inplay"` when `p_ref_source == "derived_series"` and the match is live, preventing entry evaluation on phantom edges.
+
+### Why
+The uniform per-game derivation (`series_prob_to_game_prob`) assumes all games are i.i.d. Once any game is in progress, the series moneyline absorbs in-game state (gold lead, draft, etc.) and the derivation distributes that uniformly across all games — overstating the current game's losing side and inflating future game probabilities. This produces large phantom edges that are not actionable.
+
+### Impact
+- Derived game markets (`GAME 1 *`, `GAME 2 *`, etc.) will be blocked from entry during live play. They remain visible in the TUI for informational purposes.
+- Direct Pinnacle game-level odds (when posted) and series-level entries are unaffected.
+- Pre-match derived entries (before `trueStartTime` is set) continue to work normally.
+- Toggle off with `DERIVED_GAME_BLOCK_INPLAY=false` if needed.
+
+### How to verify
+```bash
+python -m pytest tests/test_trader_guards.py -v -k derived
+```
+Expected: 4 new tests pass (`blocks_derived_inplay`, `allows_derived_prematch`, `allows_direct_inplay`, `derived_inplay_gate_disabled`).
+
+---
+
 ## 2026-02-13 — Totals (Over/Under) markets integrated for live monitor/trading
 
 ### What changed

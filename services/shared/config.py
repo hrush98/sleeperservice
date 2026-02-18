@@ -113,6 +113,9 @@ class Settings(BaseSettings):
     trigger_edge_persist_polls: int = 2
     trigger_edge_spike_threshold: float = 0.04
 
+    # Derived game in-play guard
+    derived_game_block_inplay: bool = True  # Block derived_series entries when match is live
+
     # Edge calculation
     alpha_min: float = 0.03
     alpha_spread_factor: float = 1.5
@@ -122,9 +125,9 @@ class Settings(BaseSettings):
     derived_game_alpha_spread_factor: float = 2.0
     derived_game_max_spread: float = 0.06
     derived_game_min_book_depth_usd: float = 300.0
-    totals_alpha_min: float = 0.05
+    totals_alpha_min: float = 0.07
     totals_alpha_spread_factor: float = 2.0
-    totals_max_spread: float = 0.06
+    totals_max_spread: float = 0.07
     totals_min_book_depth_usd: float = 300.0
     exit_epsilon: float = 0.015
     orientation_name_fallback_min_similarity: float = 0.6
@@ -145,7 +148,7 @@ class Settings(BaseSettings):
     entry_reeval_seconds: float = 3.0
 
     # Live trading safeguards (only used in live mode)
-    live_max_usd_per_order: float = 3.0
+    live_max_usd_per_order: float = 25.0
     live_max_shares_per_order: float = 1000.0
     live_max_open_positions: int = 5
     live_min_seconds_between_orders: float = 3.0
