@@ -1,0 +1,273 @@
+{
+  "fixtureId": "id1800245068998656",
+  "participant1Id": 309222,
+  "participant2Id": 280877,
+  "sportId": 18,
+  "tournamentId": 2450,
+  "seasonId": null,
+  "statusId": 0,
+  "hasOdds": true,
+  "startTime": "2026-02-21T21:00:00.000Z",
+  "trueStartTime": null,
+  "trueEndTime": null,
+  "updatedAt": "2026-02-20T21:00:26.977Z",
+  "externalProviders": {
+    "betradarId": 68998656,
+    "mollybetId": "2026-02-21,10069438,10024757",
+    "opticoddsId": "20260220EBC946F4",
+    "lsportsId": null,
+    "txoddsId": null,
+    "sofascoreId": null,
+    "betgeniusId": null,
+    "flashscoreId": "xn64mOz1",
+    "pinnacleId": 1624476859,
+    "oddinId": 2403973
+  },
+  "participant1Name": "Flyquest",
+  "participant2Name": "Lyon Gaming",
+  "sportName": "ESport League of Legends",
+  "tournamentSlug": "lcs",
+  "categorySlug": "riot-lol",
+  "categoryName": "Riot LoL",
+  "tournamentName": "LCS",
+  "bookmakerOdds": {
+    "pinnacle": {
+      "bookmakerIsActive": true,
+      "bookmakerFixtureId": "1624476859",
+      "fixturePath": "https://www.pinnacle.com/en/e/e/e/1624476859/#all",
+      "markets": {
+        "181": {
+          "outcomes": {
+            "181": {
+              "players": {
+                "0": {
+                  "active": true,
+                  "betslip": null,
+                  "bookmakerOutcomeId": "away",
+                  "changedAt": "2026-02-21T16:44:42.311861+00:00",
+                  "limit": 5000,
+                  "playerName": null,
+                  "price": 2.28,
+                  "exchangeMeta": {}
+                }
+              }
+            },
+            "182": {
+              "players": {
+                "0": {
+                  "active": true,
+                  "betslip": null,
+                  "bookmakerOutcomeId": "home",
+                  "changedAt": "2026-02-21T16:44:42.312072+00:00",
+                  "limit": 7861,
+                  "playerName": null,
+                  "price": 1.636,
+                  "exchangeMeta": {}
+                }
+              }
+            }
+          },
+          "bookmakerMarketId": "line/12/211390/1624476859/3466195363/0/moneyline"
+        },
+        "185": {
+          "outcomes": {
+            "185": {
+              "players": {
+                "0": {
+                  "active": true,
+                  "betslip": null,
+                  "bookmakerOutcomeId": "3.5/over",
+                  "changedAt": "2026-02-21T16:44:42.312126+00:00",
+                  "limit": 8143,
+                  "playerName": null,
+                  "price": 1.307,
+                  "exchangeMeta": {}
+                }
+              }
+            },
+            "186": {
+              "players": {
+                "0": {
+                  "active": true,
+                  "betslip": null,
+                  "bookmakerOutcomeId": "3.5/under",
+                  "changedAt": "2026-02-21T16:44:42.31225+00:00",
+                  "limit": 2500,
+                  "playerName": null,
+                  "price": 2.98,
+                  "exchangeMeta": {}
+                }
+              }
+            }
+          },
+          "bookmakerMarketId": "line/12/211390/1624476859/3466195363/0/totals"
+        },
+        "187": {
+          "outcomes": {
+            "187": {
+              "players": {
+                "0": {
+                  "active": true,
+                  "betslip": null,
+                  "bookmakerOutcomeId": "4.5/over",
+                  "changedAt": "2026-02-21T16:44:42.312294+00:00",
+                  "limit": 2500,
+                  "playerName": null,
+                  "price": 2.58,
+                  "exchangeMeta": {}
+                }
+              }
+            },
+            "188": {
+              "players": {
+                "0": {
+                  "active": true,
+                  "betslip": null,
+                  "bookmakerOutcomeId": "4.5/under",
+                  "changedAt": "2026-02-21T16:44:42.312339+00:00",
+                  "limit": 5530,
+                  "playerName": null,
+                  "price": 1.452,
+                  "exchangeMeta": {}
+                }
+              }
+            }
+          },
+          "bookmakerMarketId": "line/12/211390/1624476859/3466195363/0/totals"
+        },
+        "1821": {
+          "outcomes": {
+            "1821": {
+              "players": {
+                "0": {
+                  "active": true,
+                  "betslip": null,
+                  "bookmakerOutcomeId": "-2.5/away",
+                  "changedAt": "2026-02-21T16:44:42.312401+00:00",
+                  "limit": 29239,
+                  "playerName": null,
+                  "price": 1.171,
+                  "exchangeMeta": {}
+                }
+              }
+            },
+            "1822": {
+              "players": {
+                "0": {
+                  "active": true,
+                  "betslip": null,
+                  "bookmakerOutcomeId": "-2.5/home",
+                  "changedAt": "2026-02-21T16:44:42.312464+00:00",
+                  "limit": 5000,
+                  "playerName": null,
+                  "price": 4.38,
+                  "exchangeMeta": {}
+                }
+              }
+            }
+          },
+          "bookmakerMarketId": "line/12/211390/1624476859/3466195363/0/spreads"
+        },
+        "1825": {
+          "outcomes": {
+            "1825": {
+              "players": {
+                "0": {
+                  "active": true,
+                  "betslip": null,
+                  "bookmakerOutcomeId": "-1.5/away",
+                  "changedAt": "2026-02-21T16:44:42.312548+00:00",
+                  "limit": 8361,
+                  "playerName": null,
+                  "price": 1.598,
+                  "exchangeMeta": {}
+                }
+              }
+            },
+            "1826": {
+              "players": {
+                "0": {
+                  "active": true,
+                  "betslip": null,
+                  "bookmakerOutcomeId": "-1.5/home",
+                  "changedAt": "2026-02-21T16:44:42.312592+00:00",
+                  "limit": 5000,
+                  "playerName": null,
+                  "price": 2.36,
+                  "exchangeMeta": {}
+                }
+              }
+            }
+          },
+          "bookmakerMarketId": "line/12/211390/1624476859/3466195363/0/spreads"
+        },
+        "1837": {
+          "outcomes": {
+            "1837": {
+              "players": {
+                "0": {
+                  "active": true,
+                  "betslip": null,
+                  "bookmakerOutcomeId": "1.5/away",
+                  "changedAt": "2026-02-21T16:44:42.312627+00:00",
+                  "limit": 5000,
+                  "playerName": null,
+                  "price": 3.37,
+                  "exchangeMeta": {}
+                }
+              }
+            },
+            "1838": {
+              "players": {
+                "0": {
+                  "active": true,
+                  "betslip": null,
+                  "bookmakerOutcomeId": "1.5/home",
+                  "changedAt": "2026-02-21T16:44:42.312674+00:00",
+                  "limit": 17667,
+                  "playerName": null,
+                  "price": 1.283,
+                  "exchangeMeta": {}
+                }
+              }
+            }
+          },
+          "bookmakerMarketId": "line/12/211390/1624476859/3466195363/0/spreads"
+        },
+        "1841": {
+          "outcomes": {
+            "1841": {
+              "players": {
+                "0": {
+                  "active": true,
+                  "betslip": null,
+                  "bookmakerOutcomeId": "2.5/away",
+                  "changedAt": "2026-02-21T16:44:42.312852+00:00",
+                  "limit": 5000,
+                  "playerName": null,
+                  "price": 6.45,
+                  "exchangeMeta": {}
+                }
+              }
+            },
+            "1842": {
+              "players": {
+                "0": {
+                  "active": true,
+                  "betslip": null,
+                  "bookmakerOutcomeId": "2.5/home",
+                  "changedAt": "2026-02-21T16:44:42.312905+00:00",
+                  "limit": 65789,
+                  "playerName": null,
+                  "price": 1.076,
+                  "exchangeMeta": {}
+                }
+              }
+            }
+          },
+          "bookmakerMarketId": "line/12/211390/1624476859/3466195363/0/spreads"
+        }
+      }
+    }
+  }
+}

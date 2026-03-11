@@ -18,6 +18,16 @@ class NetEdgeResult:
     best_side: str | None
 
 
+@dataclass(frozen=True)
+class ComplementEdgeResult:
+    """Depth-aware binary complement edge result."""
+
+    edge: float | None
+    vwap_a: float | None
+    vwap_b: float | None
+    fillable_size: float
+
+
 def devig_two_way_decimal(odds_a: float, odds_b: float) -> tuple[float, float]:
     """
     Convert two-way decimal odds into de-vigged probabilities.
@@ -142,6 +152,53 @@ def compute_avg_fill_price(asks: list[tuple[float, float]], quantity: float) -> 
     if filled <= 0:
         return None
     return total_cost / filled
+
+
+def compute_vwap(asks: list[tuple[float, float]], size: float) -> tuple[float | None, float]:
+    """Return (vwap, fillable_size) for a target size on ask ladder."""
+    if size <= 0 or not asks:
+        return None, 0.0
+    remaining = size
+    total_cost = 0.0
+    filled = 0.0
+    for price, level_size in asks:
+        if remaining <= 0:
+            break
+        if level_size <= 0:
+            continue
+        take = min(level_size, remaining)
+        total_cost += price * take
+        filled += take
+        remaining -= take
+    if filled <= 0:
+        return None, 0.0
+    return total_cost / filled, filled
+
+
+def compute_complement_edge(
+    asks_a: list[tuple[float, float]],
+    asks_b: list[tuple[float, float]],
+    max_size: float,
+) -> ComplementEdgeResult:
+    """Compute depth-aware edge for Team A + Team B complement."""
+    if max_size <= 0:
+        return ComplementEdgeResult(edge=None, vwap_a=None, vwap_b=None, fillable_size=0.0)
+    vwap_a, fill_a = compute_vwap(asks_a, max_size)
+    vwap_b, fill_b = compute_vwap(asks_b, max_size)
+    fillable = min(fill_a, fill_b)
+    if fillable <= 0:
+        return ComplementEdgeResult(edge=None, vwap_a=None, vwap_b=None, fillable_size=0.0)
+    # Recompute each leg at the same executable size.
+    vwap_a, _ = compute_vwap(asks_a, fillable)
+    vwap_b, _ = compute_vwap(asks_b, fillable)
+    if vwap_a is None or vwap_b is None:
+        return ComplementEdgeResult(edge=None, vwap_a=vwap_a, vwap_b=vwap_b, fillable_size=fillable)
+    return ComplementEdgeResult(
+        edge=1.0 - vwap_a - vwap_b,
+        vwap_a=vwap_a,
+        vwap_b=vwap_b,
+        fillable_size=fillable,
+    )
 
 
 def compute_entry_edge(

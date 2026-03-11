@@ -20,6 +20,205 @@ flowchart TD
   poller -->|focus_only| ws[Polymarket_WS_subscriptions]
   trader -->|focus_only| trading[TradeSignals_and_CLOB_exec]
 
+## 2026-02-21 — Strategy mode prompt (Lead Lag / Binary / Both) and single-tape UI
+
+### What changed
+- After selecting a match and confirming orientation, the live TUI prompts for **strategy mode**: [L]ead Lag, [B]inary, or [A]ll (both). Only the selected strategy/strategies run; the tape area shows one full-width panel or both side-by-side.
+- `_prompt_strategy_mode()` in `live.py` returns `lead_lag` | `binary` | `both`. Non-interactive runs use default "both" or env `STRATEGY_MODE` (lead_lag / binary / both).
+- `build_layout(strategy_mode)` and `apply_strategy_mode_to_layout(layout, strategy_mode)` in `live_tui.py` set event_tapes panel ratios from the mode. On reselect, layout is updated in place so the tape area reflects the new choice.
+- `_AsyncRunner` takes `strategy_mode` and starts `trader` only when mode is lead_lag or both, `comp_manager` only when mode is binary or both.
+
+### Design decisions
+- Prompt is the source of truth per session (no new config flags). Config `complement_arb_enabled` still gates complement arb when the user chooses Binary or Both.
+- Reselect re-prompts strategy mode and calls `apply_strategy_mode_to_layout` so the same `Live` layout object is updated without replacing the whole UI.
+
+### Why
+Allow running only binary complement or only lead-lag for a focus match, and show a single full-width tape when only one strategy is active.
+
+### Impact
+- No config or migration. Behavior: initial and reselect flows both prompt for strategy mode; runner starts only the selected strategy/strategies; TUI shows one or two tapes accordingly.
+
+### How to verify
+- Run live monitor; after match selection and orientation, choose L / B / A. Confirm only the chosen tape(s) visible and only the chosen strategy/strategies run. Reselect (r), pick a different mode; confirm layout and runner reflect the new choice. Non-tty: set `STRATEGY_MODE=binary` (or leave unset for "both") and confirm no prompt blocks.
+
+---
+
+## 2026-02-21 — In-play P_ref staleness guard and no triggers when paused/stale
+
+### What changed
+- **In-play P_ref staleness guard:** When the match is live and Pinnacle odds (from OddsPapi) are older than 120s, P_ref is treated as stale: snapshot gets `p_ref_stale=True`, `p_ref_a`/`p_ref_b` are nulled, and entry/triggers do not use them. Config `p_ref_stale_seconds_inplay` (default 120).
+- **No trigger events when paused or P_ref stale:** When the user is paused or when match snapshot has `p_ref_stale=True`, trigger detection is skipped, triggers for the fixture are cleared, and no TRIGGER TradeEvents are created or stored.
+- New helper `OddsPapiClient.get_pinnacle_p_ref_changed_at()` for Pinnacle last-update time; new snapshot field `p_ref_stale`; TUI shows “(stale)” and footnote when P_ref is stale.
+
+### Design decisions
+- Staleness uses Pinnacle outcome `changed_at` (or payload `updatedAt` fallback); only applied when `pin_is_inplay` is True. Pre-match odds are not gated by this.
+- Trader skips the entire trigger block (no `update_p_ref`, no new TriggerRecords) and clears `self._triggers` for the fixture when paused or `match_snap.p_ref_stale`, so no TRIGGER TradeEvent is persisted.
+
+### Why
+OddsPapi can indicate a match is live (trueStartTime set) while Pinnacle odds in the response are not updated (stale). Using stale P_ref for entry or recording trigger events would store bad information.
+
+### Impact
+- New config: `p_ref_stale_seconds_inplay` (float, default 120). No migration.
+- While in-play and odds older than threshold (or when paused), no new triggers and no TRIGGER TradeEvents; entry already blocked by null p_ref when stale.
+
+### How to verify
+- Run live monitor on an in-play fixture where OddsPapi returns stale Pinnacle odds; confirm TUI shows “(stale)” and no trigger/entry. With `p_ref_stale_seconds_inplay` > 0 and `pin_is_inplay` True, snapshot has `p_ref_stale=True` and `p_ref_a`/`p_ref_b` None. Unit tests: `get_pinnacle_p_ref_changed_at`, snapshot staleness, and (optional) trader guard.
+
+---
+
+## 2026-02-21 — MATCH (ML) odds orientation investigation (no code change)
+
+### What changed
+- Manual pull from OddsPapi and Polymarket Gamma to compare raw payloads.
+- Documented root cause and re-runnable curl/Python + jq steps in [docs/adr/odds-orientation-manual-check.md](docs/adr/odds-orientation-manual-check.md).
+
+### Design decisions
+- OddsPapi **match** moneyline (`.../0/moneyline`) returns `home`/`away` with **no `playerId`**, so orientation for match_winner cannot be ID-based and falls back to name matching (fragile). Game markets can include `playerId` → ID-based orientation works for GAME 1. Explains “swapped only for MATCH, not GAME 1”.
+- Manual check procedure and optional future safeguard (operator confirm when match orientation is name-based) described in ADR.
+
+### Why
+Recurring MATCH odds swap; need to confirm source of truth from APIs and enable manual re-check.
+
+### Impact
+- No code or migration. Investigation only; follow-up may add manual confirmation or UI hint when match orientation is name-based.
+
+### How to verify
+- Re-run the Python block and jq commands in the ADR; confirm match moneyline outcomes have `playerId: null`.
+
+---
+
+## 2026-02-21 — Match orientation from game market player_id (default)
+
+### What changed
+- **Match and game use the same ordering.** When the match moneyline has no `playerId` (typical from OddsPapi), orientation for **match_winner** is now derived from the first game market (game 1, 2, or 3) that has `player_id` in its outcomes.
+- New helper `_orientation_swap_from_game_markets(odds_payload)` in `services/cli/poller.py`; match_winner branch in `_extract_p_refs_from_odds` uses it before name fallback. Orientation status `game_id_fallback`, source `game_N_player_id`.
+- Tests: `test_match_orientation_from_game_player_id_when_match_has_no_player_id`, `test_orientation_swap_from_game_markets_returns_swap_true_when_game_away_is_p1`; existing orientation tests updated with `line_value=None`.
+
+### Design decisions
+- Game markets (e.g. game 1) often include `playerId`; match market does not. Reuse the same fixture’s game-market home/away → participant1/2 mapping for the match so MATCH and GAME 1 stay aligned.
+- Fallback order: locked mapping → match market player_id (if present) → **game market player_id** → name matching → unresolved.
+
+### Why
+Recurring MATCH odds swap; game was correct because it had IDs. Using game’s orientation for match removes the mismatch.
+
+### Impact
+- No migration. When a fixture has at least one game market with `playerId`, match_winner orientation is ID-based from that game instead of name-based.
+
+### How to verify
+- `PYTHONPATH=. conda run -n poly pytest tests/test_orientation_safety.py -v` — all 7 tests pass, including the two new ones.
+- Live: for a mapped match with game markets, MATCH (ML) row should align with GAME 1 (orientation status `game_id_fallback` when applicable).
+
+---
+
+## 2026-02-21 — Manual orientation confirmation at focus
+
+### What changed
+- When the user selects a match for focus (initial or reselect), a confirmation step shows **Pinnacle order** (1. X  2. Y) and **Polymarket order** (1. A  2. B) and prompts: [Y]es / [S]wap Pinnacle / [C]ancel.
+- The choice is stored in the mapping’s `match_details` as `orientation_locked=True`, `team_a_is_home` (true if Yes, false if Swap), `orientation_anchor_source="manual_focus_confirm"`, plus `home_team`/`away_team`. Used for **all** markets (match + games) so orientation is consistent.
+- When `orientation_anchor_source == "manual_focus_confirm"`, the poller does **not** set `orientation["conflict"]` from the name-mismatch check, so no CONFLICT/“skip orientation_conflict” for manually confirmed mappings.
+- New config `orientation_manual_confirm_skip_if_set` (default True): skip the prompt when the mapping already has `manual_focus_confirm`.
+- New function `_prompt_orientation_confirmation` in [services/cli/live.py](services/cli/live.py); call sites after `_prompt_match_selection` (initial and reselect). On [C]ancel, return None and abort/reprompt.
+
+### Design decisions
+- Manual confirmation at focus is the **source of truth** when set: one stored `team_a_is_home` applies to match and all game markets, overriding automatic inference and avoiding lock-vs-ID conflicts.
+- See [docs/adr/manual-orientation-confirmation.md](docs/adr/manual-orientation-confirmation.md).
+
+### Why
+Automatic orientation (lock from discovery, game_id_fallback, name matching) can disagree across match vs games or trigger CONFLICT. Letting the operator confirm order once per match (as seen on Pinnacle and Polymarket) gives a single, consistent mapping.
+
+### Impact
+- No migration. New prompt on first focus (or when not yet confirmed); reselect of same match skips prompt when skip_if_set is true. Existing mappings without manual_focus_confirm behave as before.
+
+### How to verify
+- `cd services && PYTHONPATH=. conda run -n poly python -m cli live --mode paper`; select a match; see Pinnacle vs PM order prompt; choose [S]wap Pinnacle. Confirm MATCH (ML) and GAME 1/2 show aligned odds and header shows `ORIENT LOCKED:manual_focus_confirm` with no CONFLICT. Reselect same match; prompt skipped and odds still correct.
+
+---
+
+## 2026-02-21 — Balance sync safeguards (1 + 2 + 3)
+
+### What changed
+- **Safeguard 1:** Balances below `balance_reconcile_min_sane_quantity` (default 0.01) are treated as "effective zero" and use the existing zero-poll path only; no one-shot qty_sync from a confirmed size down to zero or below the floor.
+- **Safeguard 2:** Within `entry_confirmed_sync_cooldown_seconds` (default 90s) after the last ENTRY_CONFIRMED for a position, balance reconciliation does not overwrite `trade.quantity` / `position.quantity` with a lower balance; sync-up is still allowed.
+- **Safeguard 3:** When syncing down (balance &lt; current quantity), the new quantity is applied only after the same lower balance has been seen for `balance_sync_down_polls_required` (default 2) consecutive polls.
+- New config in `services/shared/config.py`: `balance_reconcile_min_sane_quantity`, `entry_confirmed_sync_cooldown_seconds`, `balance_sync_down_polls_required`. Reconciliation logic and state in `services/cli/trader.py` (`_reconcile_open_trade_balances`, `_next_balance_zero_poll_count`, `_balance_sync_down_state`).
+
+### Design decisions
+- See [docs/adr/balance-sync-safeguards.md](docs/adr/balance-sync-safeguards.md).
+
+### Why
+A single balance poll shortly after entry could return a low/zero balance (e.g. API lag), causing one-shot overwrite of a confirmed position size and blocking exit with `exit_size_zero`. These safeguards prevent that class of failure.
+
+### Impact
+- No migration. Behavior: balance reconciliation never one-shot syncs a confirmed full size down to zero or below the floor; sync-down is gated by ENTRY_CONFIRMED cooldown and by multi-poll confirmation.
+
+### How to verify
+- `conda run -n poly pytest tests/test_order_attempts.py tests/test_trader_guards.py -v` — all tests pass, including `test_next_balance_zero_poll_count_below_min_sane_quantity_increments` and `test_next_balance_zero_poll_count_at_or_above_min_sane_quantity_resets`.
+- Live: open a position, confirm balance reconciliation does not overwrite quantity from a single low/zero poll within the cooldown window.
+
+---
+
+## 2026-02-21 — OddsPapi match vs game moneyline (path-style)
+
+### What changed
+- OddsPapi match moneyline now prefers the **series** market when both match (`.../0/moneyline`) and game moneylines (`.../1/`, `.../2/`, `.../3/moneyline`) exist; "multiple home/away markets found; refusing to guess" no longer fires in that case.
+- Path-style game index in `bookmakerMarketId` is recognized: `_market_game_number` parses `/(\d)/(?:moneyline|totals|spreads)` so game 0 = match, game 1/2/3 = games; `_market_is_game` excludes game 0 so only game-level markets are skipped when extracting match moneyline.
+
+### Why
+OddsPapi added game-level markets; their IDs use path segments (e.g. `line/.../0/moneyline`, `line/.../2/moneyline`) rather than literal "gameN"/"mapN", so all four were treated as match candidates.
+
+### Impact
+- No migration. Logic-only change in `services/shared/oddspapi_client.py`.
+- Match moneyline extraction returns the single series market; game-level extraction (`extract_pinnacle_game_winner`) now correctly finds game 1/2/3 markets when OddsPapi uses path-style IDs, improving live game trading.
+
+### How to verify
+- `PYTHONPATH=. conda run -n poly pytest tests/test_oddspapi_client.py -v` — all tests pass, including `test_market_game_number_path_style`, `test_market_is_game_excludes_match`, `test_extract_pinnacle_moneyline_prefers_match_when_path_style`.
+- For a fixture with match + game moneylines: `cd services && python -m tools.oddspapi_inspect_odds [fixture_id]` — only the match market is reported as the chosen candidate.
+
+---
+
+## 2026-02-18 — Binary complement arb strategy added to live monitor
+
+### What changed
+- Added a new `ComplementArbManager` running alongside lead-lag in `cli live`, using shared poller + WS + executor infrastructure.
+- Added depth-aware complement edge math (`compute_vwap`, `compute_complement_edge`) and FOK execution helpers (`place_fok_order`, `place_fok_batch`).
+- Extended the live TUI with a dedicated `Binary Comp` tape panel so complement events are visible separately from lead-lag trade tape.
+- Added strategy attribution to shared trade tables (`positions`, `order_attempts`, `trade_events`) plus a new `complement_arbs` lifecycle table.
+- Added complement strategy config controls (`complement_*`) and a focused test suite (`tests/test_complement_arb.py`).
+
+### Design decisions
+- Keep **shared market data infrastructure** (single poller + single WS manager) to avoid duplicate subscriptions and racey divergent book views.
+- Keep **independent strategy managers** to isolate signal logic, state machines, and failure modes.
+- Use **batch FOK as latency primitive**, but model one-leg outcomes explicitly because batch placement is not atomic.
+- Reuse existing tables with `strategy='complement_arb'` instead of creating parallel event/attempt tables, and add one strategy-specific aggregate table (`complement_arbs`) for two-leg lifecycle state.
+
+flowchart TD
+  poller[SingleMatchPoller] --> leadLag[TradeManager_lead_lag]
+  poller --> comp[ComplementArbManager]
+  ws[PolymarketWS] --> leadLag
+  ws --> comp
+  exec[ClobExecutor] --> leadLag
+  exec --> comp
+  leadLag --> shared[positions_order_attempts_trade_events]
+  comp --> shared
+  comp --> compTable[complement_arbs]
+
+### Why
+Reference-prob reliability for in-match LoL is inconsistent. Binary complement arbitrage (`ask(A)+ask(B)<1`) adds a model-light, mechanically testable signal family that can run in parallel with lead-lag and broaden coverage.
+
+### Impact
+- Migration required: `0014_complement_arb_strategy`.
+- Live monitor can now run two strategies simultaneously without separate processes.
+- Trade analytics can be segmented by `strategy` while preserving existing dashboards/queries over shared tables.
+- New TUI panel improves operational visibility for complement-specific execution events.
+
+### How to verify
+- `conda run -n poly pytest tests/test_complement_arb.py tests/test_trader_guards.py`
+  - Expected: all tests pass.
+- `conda run -n poly alembic upgrade head`
+  - Expected: `complement_arbs` table created, `strategy` column present in `positions`, `order_attempts`, `trade_events`.
+- `conda run -n poly python -m cli live --mode paper`
+  - Expected: TUI includes `Binary Comp` panel; complement events appear there when enabled (`COMPLEMENT_ARB_ENABLED=true`).
+
 ## 2026-02-14 — Block derived game entries when match is in-play
 
 ### What changed

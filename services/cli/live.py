@@ -16,7 +16,8 @@ import tty
 from datetime import datetime, timedelta, timezone
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
-from threading import Thread
+from threading import Event, Thread
+from typing import Literal
 
 import typer
 from rich.console import Console
@@ -34,9 +35,10 @@ from shared.polymarket_client import AsyncPolymarketClient
 from shared.polymarket_user_ws import PolymarketUserWSManager
 from shared.polymarket_ws import PolymarketWSManager
 
-from .live_tui import build_layout, render_layout
+from .live_tui import apply_strategy_mode_to_layout, build_layout, render_layout
 from .monitor_types import LogBuffer, LogBufferHandler
 from .poller import SingleMatchPoller
+from .complement_arb import ComplementArbManager
 from .trader import TradeManager
 
 logger = logging.getLogger("cli.live")
@@ -67,7 +69,7 @@ def _configure_logging_for_live(log_buffer: LogBuffer, *, trade_mode: str) -> No
             logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
         )
         log_buffer.add(f"Black box log: {logfile}")
-    except Exception as exc:  # pragma: no cover - best effort logging
+    except Exception as exc:  # pragma: no cover - best effort logging  # pylint: disable=broad-exception-caught
         file_handler = None
         log_buffer.add(f"File logging disabled: {exc}")
 
@@ -137,17 +139,24 @@ def live_command(
     fixture_states = FixtureStateManager()
 
     trade_buffer = LogBuffer(max_lines=10)
+    comp_buffer = LogBuffer(max_lines=10)
     log_buffer = LogBuffer(max_lines=12)
     log_buffer.add("Live monitor started")
     log_buffer.add(f"Trading mode: {trade_mode}")
     _configure_logging_for_live(log_buffer, trade_mode=trade_mode)
-    layout = build_layout()
+    paused_event: Event = Event()
 
     selection = _prompt_match_selection()
     if not selection:
         typer.echo("No matches available.")
         return
     mapping, op_fixture, pm_fixtures, league_name = selection
+    mapping = _prompt_orientation_confirmation(mapping, op_fixture, pm_fixtures)
+    if mapping is None:
+        typer.echo("Orientation cancelled.")
+        return
+    strategy_mode = _prompt_strategy_mode()
+    layout = build_layout(strategy_mode)
     pm_fixture = pm_fixtures[0]  # primary (match_winner)
     pm_question = (pm_fixture.raw_json or {}).get("question")
     pm_condition_id = (pm_fixture.raw_json or {}).get("conditionId")
@@ -182,11 +191,25 @@ def live_command(
         log_buffer=log_buffer,
         trade_buffer=trade_buffer,
         live_private_key=live_private_key,
+        paused_event=paused_event,
+    )
+    comp_manager = ComplementArbManager(
+        poller=poller,
+        ws_manager=ws_manager,
+        mapping=mapping,
+        pm_fixtures=pm_fixtures,
+        trade_mode=trade_mode,
+        log_buffer=log_buffer,
+        trade_buffer=comp_buffer,
+        executor=trader.executor,
+        paused_event=paused_event,
     )
     if trade_mode == "live" and settings.user_ws_enabled and trader.executor:
         user_ws = PolymarketUserWSManager(auth=trader.executor.api_creds)
         trader.set_user_ws(user_ws)
-    runner = _AsyncRunner(poller, trader, user_ws, condition_ids)
+    runner = _AsyncRunner(
+        poller, trader, comp_manager, user_ws, condition_ids, strategy_mode
+    )
     runner.start()
 
     ui_interval = min(1.0, interval)
@@ -198,11 +221,19 @@ def live_command(
         old_term_settings = termios.tcgetattr(fd)
         tty.setcbreak(fd)
     try:
-        with Live(layout, console=console, refresh_per_second=refresh_rate, screen=True) as live:
+        with Live(layout, console=console, refresh_per_second=refresh_rate, screen=True) as _live:
             while True:
                 if use_tty and select.select([sys.stdin], [], [], 0)[0]:
                     data = os.read(fd, 1024)
                     for ch in data.decode(errors="ignore"):
+                        if ch in ("p", "P"):
+                            if paused_event.is_set():
+                                paused_event.clear()
+                                log_buffer.add("Triggers resumed (unpaused)")
+                            else:
+                                paused_event.set()
+                                log_buffer.add("Triggers paused (P)")
+                            continue
                         if ch in ("\r", "\n"):
                             command_line = input_buffer.strip()
                             input_buffer = ""
@@ -218,6 +249,12 @@ def live_command(
                                 if not selection:
                                     raise KeyboardInterrupt
                                 mapping, op_fixture, pm_fixtures, league_name = selection
+                                mapping = _prompt_orientation_confirmation(mapping, op_fixture, pm_fixtures)
+                                if mapping is None:
+                                    log_buffer.add("Orientation cancelled; reselect match.")
+                                    continue
+                                strategy_mode = _prompt_strategy_mode()
+                                apply_strategy_mode_to_layout(layout, strategy_mode)
                                 pm_fixture = pm_fixtures[0]
                                 pm_question = (pm_fixture.raw_json or {}).get("question")
                                 pm_condition_id = (pm_fixture.raw_json or {}).get("conditionId")
@@ -252,11 +289,25 @@ def live_command(
                                     log_buffer=log_buffer,
                                     trade_buffer=trade_buffer,
                                     live_private_key=live_private_key,
+                                    paused_event=paused_event,
+                                )
+                                comp_manager = ComplementArbManager(
+                                    poller=poller,
+                                    ws_manager=ws_manager,
+                                    mapping=mapping,
+                                    pm_fixtures=pm_fixtures,
+                                    trade_mode=trade_mode,
+                                    log_buffer=log_buffer,
+                                    trade_buffer=comp_buffer,
+                                    executor=trader.executor,
+                                    paused_event=paused_event,
                                 )
                                 if trade_mode == "live" and settings.user_ws_enabled and trader.executor:
                                     user_ws = PolymarketUserWSManager(auth=trader.executor.api_creds)
                                     trader.set_user_ws(user_ws)
-                                runner = _AsyncRunner(poller, trader, user_ws, condition_ids)
+                                runner = _AsyncRunner(
+                                    poller, trader, comp_manager, user_ws, condition_ids, strategy_mode
+                                )
                                 runner.start()
                         elif ch in ("\x7f", "\b"):
                             input_buffer = input_buffer[:-1]
@@ -278,12 +329,14 @@ def live_command(
                     layout=layout,
                     snapshots=snapshots,
                     trade_buffer=trade_buffer,
+                    comp_buffer=comp_buffer,
                     log_buffer=log_buffer,
                     spread_factor=spread_factor,
                     perf=perf,
                     ws_connected=ws_manager.is_connected(),
                     mode_label=trade_mode,
                     input_text=input_buffer,
+                    paused=paused_event.is_set(),
                     pm_question=pm_question,
                     pm_condition_id=pm_condition_id,
                     positions=positions,
@@ -429,6 +482,91 @@ def _fixture_sport_label(fixture: Fixture) -> str:
     return "LoL" if "lol" in normalized else "Other"
 
 
+def _prompt_orientation_confirmation(
+    mapping: Mapping,
+    op_fixture: Fixture,
+    pm_fixtures: list[Fixture],
+) -> Mapping | None:
+    """
+    Prompt user to confirm Pinnacle vs Polymarket team order; persist as manual_focus_confirm.
+    Returns updated mapping (with new match_details) or None on cancel.
+    """
+    if not sys.stdin.isatty():
+        return mapping
+    details = mapping.match_details if isinstance(mapping.match_details, dict) else {}
+    if (
+        settings.orientation_manual_confirm_skip_if_set
+        and details.get("orientation_anchor_source") == "manual_focus_confirm"
+        and details.get("orientation_locked")
+    ):
+        return mapping
+    pm_match = pm_fixtures[0]
+    pin_1 = op_fixture.team_a_name or "?"
+    pin_2 = op_fixture.team_b_name or "?"
+    pm_1 = pm_match.team_a_name or "?"
+    pm_2 = pm_match.team_b_name or "?"
+    typer.echo("")
+    typer.echo("Confirm team order (as shown on the books):")
+    typer.echo(f"  Pinnacle:  1. {pin_1}  2. {pin_2}")
+    typer.echo(f"  Polymarket: 1. {pm_1}  2. {pm_2}")
+    while True:
+        response = typer.prompt(
+            "Do these match the books? [Y]es  [S]wap Pinnacle  [C]ancel",
+            default="y",
+            show_default=False,
+        )
+        raw = (response or "").strip().lower()
+        if raw in ("y", "yes"):
+            team_a_is_home = True
+            break
+        if raw in ("s", "swap"):
+            team_a_is_home = False
+            break
+        if raw in ("c", "cancel"):
+            return None
+        typer.echo("Enter Y, S, or C.")
+    home_team = op_fixture.team_a_name if team_a_is_home else op_fixture.team_b_name
+    away_team = op_fixture.team_b_name if team_a_is_home else op_fixture.team_a_name
+    new_details = {**(details or {}), "orientation_locked": True, "team_a_is_home": team_a_is_home}
+    new_details["orientation_anchor_source"] = "manual_focus_confirm"
+    new_details["home_team"] = home_team
+    new_details["away_team"] = away_team
+    with SessionLocal() as db:
+        m = db.get(Mapping, mapping.id)
+        if not m:
+            return mapping
+        m.match_details = new_details
+        db.commit()
+        db.refresh(m)
+        return m
+
+
+StrategyMode = Literal["lead_lag", "binary", "both"]
+
+
+def _prompt_strategy_mode() -> StrategyMode:
+    """Prompt for strategy: Lead Lag, Binary, or Both. Non-tty uses default or STRATEGY_MODE env."""
+    if not sys.stdin.isatty():
+        raw = os.environ.get("STRATEGY_MODE", "both").strip().lower()
+        if raw in ("lead_lag", "l", "leadlag"):
+            return "lead_lag"
+        if raw in ("binary", "b"):
+            return "binary"
+        return "both"
+    typer.echo("")
+    typer.echo("Strategy: [L]ead Lag  [B]inary  [A]ll (both)")
+    while True:
+        response = typer.prompt("Choice", default="a", show_default=False)
+        raw = (response or "").strip().lower()
+        if raw in ("l", "lead_lag", "leadlag"):
+            return "lead_lag"
+        if raw in ("b", "binary"):
+            return "binary"
+        if raw in ("a", "all", "both"):
+            return "both"
+        typer.echo("Enter L, B, or A.")
+
+
 def _get_completed_positions_for_mapping(mapping_id: str, limit: int) -> list:
     """Return recent completed positions (confirmed entry + closed exit)."""
     with SessionLocal() as db:
@@ -503,13 +641,17 @@ class _AsyncRunner:
         self,
         poller: SingleMatchPoller,
         trader: TradeManager,
+        comp_manager: ComplementArbManager,
         user_ws: PolymarketUserWSManager | None,
         condition_ids: list[str],
+        strategy_mode: StrategyMode,
     ) -> None:
         self._poller = poller
         self._trader = trader
+        self._comp_manager = comp_manager
         self._user_ws = user_ws
         self._condition_ids = condition_ids
+        self._strategy_mode = strategy_mode
         self._thread: Thread | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
         self._stop_event: asyncio.Event | None = None
@@ -528,8 +670,12 @@ class _AsyncRunner:
                     user_ws_task = asyncio.create_task(self._user_ws.run())
                     await self._user_ws.update_subscriptions(self._condition_ids)
                 await self._poller.start()
-                await self._trader.start()
+                if self._strategy_mode in ("lead_lag", "both"):
+                    await self._trader.start()
+                if self._strategy_mode in ("binary", "both"):
+                    await self._comp_manager.start()
                 await stop_event.wait()
+                await self._comp_manager.stop()
                 await self._trader.stop()
                 await self._poller.stop()
                 if self._user_ws:

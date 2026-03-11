@@ -66,3 +66,6 @@ Every milestone implementation should include:
 - expected service health signals
 - at least one “happy path” query (curl or equivalent)
 - common failure mode notes (missing env vars, DB not up, API rate limits)
+
+##
+DO NOT CREATE RANDOM OR NEW MARKDOWN FILES FOR EXPLANATIONS. Put the overview IN THE CHAT of any explanation or recommendations. Then, when we actually implement them, we can actually add them to the proper documents

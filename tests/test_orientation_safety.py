@@ -1,6 +1,10 @@
 from types import SimpleNamespace
 
-from services.cli.poller import _extract_p_refs_from_odds, _resolve_token_ids_from_mapping
+from services.cli.poller import (
+    _extract_p_refs_from_odds,
+    _orientation_swap_from_game_markets,
+    _resolve_token_ids_from_mapping,
+)
 
 
 def _make_fixture(team_a: str, team_b: str) -> SimpleNamespace:
@@ -68,6 +72,7 @@ def test_extract_p_refs_uses_name_fallback_when_ids_present_but_ambiguous() -> N
         payload,
         market_type="match_winner",
         game_number=None,
+        line_value=None,
         op_fixture=fixture,
     )
     assert orientation["status"] == "name_swapped"
@@ -90,6 +95,7 @@ def test_extract_p_refs_blocks_unresolved_abbrev_orientation() -> None:
         payload,
         market_type="match_winner",
         game_number=None,
+        line_value=None,
         op_fixture=fixture,
     )
     assert orientation["status"] == "unresolved"
@@ -135,6 +141,7 @@ def test_extract_p_refs_uses_locked_orientation_when_present() -> None:
         payload,
         market_type="match_winner",
         game_number=None,
+        line_value=None,
         op_fixture=fixture,
         mapping_details={
             "orientation_locked": True,
@@ -148,6 +155,123 @@ def test_extract_p_refs_uses_locked_orientation_when_present() -> None:
     assert odds_a == 1.70
     assert odds_b == 2.20
     assert p_ref_a is not None and p_ref_b is not None
+
+
+def test_match_orientation_from_game_player_id_when_match_has_no_player_id() -> None:
+    """Match and game use same ordering; use game market player_id for match when match has none."""
+    fixture = _make_fixture("Fnatic", "Team Vitality")
+    # Match market: home/away, no playerId. Game 1 market: game1/home, game1/away with playerId.
+    payload = {
+        "participant1Id": 100,
+        "participant2Id": 200,
+        "participant1Name": "Fnatic",
+        "participant2Name": "Team Vitality",
+        "bookmakerOdds": {
+            "pinnacle": {
+                "markets": {
+                    "181": {
+                        "bookmakerMarketId": "line/12/211390/1624476859/3466195363/0/moneyline",
+                        "outcomes": {
+                            "181a": {
+                                "players": {
+                                    "0": {
+                                        "bookmakerOutcomeId": "home",
+                                        "price": 1.636,
+                                        "playerId": None,
+                                    }
+                                }
+                            },
+                            "181b": {
+                                "players": {
+                                    "0": {
+                                        "bookmakerOutcomeId": "away",
+                                        "price": 2.28,
+                                        "playerId": None,
+                                    }
+                                }
+                            },
+                        },
+                    },
+                    "g1": {
+                        "bookmakerMarketId": "line/12/211390/1624476859/3466195363/1/moneyline",
+                        "outcomes": {
+                            "g1h": {
+                                "players": {
+                                    "0": {
+                                        "bookmakerOutcomeId": "game1/home",
+                                        "price": 1.65,
+                                        "playerId": 100,
+                                    }
+                                }
+                            },
+                            "g1a": {
+                                "players": {
+                                    "0": {
+                                        "bookmakerOutcomeId": "game1/away",
+                                        "price": 2.25,
+                                        "playerId": 200,
+                                    }
+                                }
+                            },
+                        },
+                    },
+                }
+            }
+        },
+    }
+    p_ref_a, p_ref_b, odds_a, odds_b, orientation = _extract_p_refs_from_odds(
+        payload,
+        market_type="match_winner",
+        game_number=None,
+        line_value=None,
+        op_fixture=fixture,
+    )
+    assert orientation["status"] == "game_id_fallback"
+    assert orientation.get("source") == "game_1_player_id"
+    # Fnatic = team_a, participant1 = 100 = home in game1 -> no swap; match home -> team_a
+    assert odds_a == 1.636
+    assert odds_b == 2.28
+    assert p_ref_a is not None and p_ref_b is not None
+
+
+def test_orientation_swap_from_game_markets_returns_swap_true_when_game_away_is_p1() -> None:
+    """When game has home=p2, away=p1 we get swap_order True."""
+    payload = {
+        "participant1Id": 100,
+        "participant2Id": 200,
+        "bookmakerOdds": {
+            "pinnacle": {
+                "markets": {
+                    "g1": {
+                        "bookmakerMarketId": "line/1/moneyline",
+                        "outcomes": {
+                            "h": {
+                                "players": {
+                                    "0": {
+                                        "bookmakerOutcomeId": "game1/home",
+                                        "price": 1.9,
+                                        "playerId": 200,
+                                    }
+                                }
+                            },
+                            "a": {
+                                "players": {
+                                    "0": {
+                                        "bookmakerOutcomeId": "game1/away",
+                                        "price": 1.95,
+                                        "playerId": 100,
+                                    }
+                                }
+                            },
+                        },
+                    },
+                }
+            }
+        },
+    }
+    swap_order, game_used = _orientation_swap_from_game_markets(payload)
+    assert swap_order is True
+    assert game_used == 1
 
 
 def test_extract_p_refs_blocks_when_locked_orientation_is_invalid() -> None:
@@ -166,6 +290,7 @@ def test_extract_p_refs_blocks_when_locked_orientation_is_invalid() -> None:
         payload,
         market_type="match_winner",
         game_number=None,
+        line_value=None,
         op_fixture=fixture,
         mapping_details={
             "orientation_locked": True,

@@ -435,6 +435,34 @@ class SingleMatchPoller:
             else False
         )
 
+        p_ref_stale = False
+        if pin_is_inplay and float(settings.p_ref_stale_seconds_inplay) > 0:
+            p_ref_changed_at = OddsPapiClient.get_pinnacle_p_ref_changed_at(
+                odds_payload or {},
+                market_type=market_type,
+                game_number=game_number,
+            )
+            if p_ref_changed_at is None:
+                p_ref_stale = True
+            else:
+                age_seconds = (now - p_ref_changed_at).total_seconds()
+                if age_seconds > float(settings.p_ref_stale_seconds_inplay):
+                    p_ref_stale = True
+            if p_ref_stale:
+                p_ref_a = None
+                p_ref_b = None
+                odds_a = None
+                odds_b = None
+                edge = compute_net_edges(
+                    p_ref_a=None,
+                    p_ref_b=None,
+                    bid_a=bid_a,
+                    ask_a=ask_a,
+                    bid_b=bid_b,
+                    ask_b=ask_b,
+                    spread_factor=self._spread_factor,
+                )
+
         return FocusSnapshot(
             mapping_id=str(self._mapping.id),
             league=self._league_name,
@@ -465,6 +493,7 @@ class SingleMatchPoller:
             orientation_source=orientation.get("source"),
             orientation_conflict=orientation_conflict_active,
             pin_is_inplay=pin_is_inplay,
+            p_ref_stale=p_ref_stale,
             edge=edge if isinstance(edge, NetEdgeResult) else NetEdgeResult(None, None, None, None),
             updated_at=now,
             ws_connected=self._ws_manager.is_connected(),
@@ -533,6 +562,37 @@ def _extract_tick_size(market_raw: dict) -> float | None:
         except (TypeError, ValueError):
             continue
     return None
+
+
+def _orientation_swap_from_game_markets(odds_payload: dict) -> tuple[bool | None, int | None]:
+    """
+    Derive home/away ordering from the first game market that has player_id.
+    Match and game use the same ordering; use this for match when match has no playerId.
+    Returns (swap_order, game_number_used) or (None, None).
+    """
+    p1_id = odds_payload.get("participant1Id")
+    p2_id = odds_payload.get("participant2Id")
+    if p1_id is None or p2_id is None:
+        return None, None
+    p1_s, p2_s = str(p1_id), str(p2_id)
+    for gn in (1, 2, 3):
+        game_odds = OddsPapiClient.extract_pinnacle_game_winner(odds_payload, gn)
+        if not game_odds:
+            continue
+        home = game_odds.get("home") if isinstance(game_odds, dict) else None
+        away = game_odds.get("away") if isinstance(game_odds, dict) else None
+        if not isinstance(home, dict) or not isinstance(away, dict):
+            continue
+        home_id = home.get("player_id")
+        away_id = away.get("player_id")
+        if home_id is None or away_id is None:
+            continue
+        h_s, a_s = str(home_id), str(away_id)
+        if h_s == p1_s and a_s == p2_s:
+            return False, gn
+        if h_s == p2_s and a_s == p1_s:
+            return True, gn
+    return None, None
 
 
 def _extract_p_refs_from_odds(
@@ -635,24 +695,26 @@ def _extract_p_refs_from_odds(
             odds_a = home.get("price") if team_a_is_home else away.get("price")
             odds_b = away.get("price") if team_a_is_home else home.get("price")
             orientation["status"] = "locked_home" if team_a_is_home else "locked_away"
-            participant1_name = odds_payload.get("participant1Name")
-            participant2_name = odds_payload.get("participant2Name")
-            if op_fixture and participant1_name and participant2_name:
-                direct_score = (
-                    _similarity(participant1_name, op_fixture.team_a_name)
-                    + _similarity(participant2_name, op_fixture.team_b_name)
-                ) / 2
-                swapped_score = (
-                    _similarity(participant1_name, op_fixture.team_b_name)
-                    + _similarity(participant2_name, op_fixture.team_a_name)
-                ) / 2
-                inferred_team_a_is_home = direct_score >= swapped_score
-                if (
-                    max(direct_score, swapped_score) >= float(settings.orientation_name_fallback_min_similarity)
-                    and abs(direct_score - swapped_score) >= float(settings.orientation_anchor_min_margin)
-                    and inferred_team_a_is_home != team_a_is_home
-                ):
-                    orientation["conflict"] = "locked_name_mismatch"
+            # Skip name-mismatch conflict when user confirmed at focus (manual_focus_confirm).
+            if match_details.get("orientation_anchor_source") != "manual_focus_confirm":
+                participant1_name = odds_payload.get("participant1Name")
+                participant2_name = odds_payload.get("participant2Name")
+                if op_fixture and participant1_name and participant2_name:
+                    direct_score = (
+                        _similarity(participant1_name, op_fixture.team_a_name)
+                        + _similarity(participant2_name, op_fixture.team_b_name)
+                    ) / 2
+                    swapped_score = (
+                        _similarity(participant1_name, op_fixture.team_b_name)
+                        + _similarity(participant2_name, op_fixture.team_a_name)
+                    ) / 2
+                    inferred_team_a_is_home = direct_score >= swapped_score
+                    if (
+                        max(direct_score, swapped_score) >= float(settings.orientation_name_fallback_min_similarity)
+                        and abs(direct_score - swapped_score) >= float(settings.orientation_anchor_min_margin)
+                        and inferred_team_a_is_home != team_a_is_home
+                    ):
+                        orientation["conflict"] = "locked_name_mismatch"
             if odds_a is not None and odds_b is not None:
                 p_ref_a, p_ref_b = devig_two_way_decimal(odds_a, odds_b)
             return p_ref_a, p_ref_b, odds_a, odds_b, orientation
@@ -691,6 +753,19 @@ def _extract_p_refs_from_odds(
                         "OddsPapi: swapping home/away to match participant ordering "
                         f"({op_fixture.source_id})",
                         key=f"odds-participant-swap:{op_fixture.source_id}:{game_number}",
+                        cooldown_seconds=120,
+                    )
+        # Match and game use same ordering; match market often has no playerId — use game market.
+        if swap_order is None and market_type == "match_winner":
+            swap_order, game_used = _orientation_swap_from_game_markets(odds_payload)
+            if swap_order is not None and game_used is not None:
+                orientation["status"] = "game_id_fallback"
+                orientation["source"] = f"game_{game_used}_player_id"
+                if log_buffer and op_fixture:
+                    log_buffer.add(
+                        f"OddsPapi: match orientation from game {game_used} player_id "
+                        f"({op_fixture.source_id})",
+                        key=f"odds-match-from-game:{op_fixture.source_id}",
                         cooldown_seconds=120,
                     )
         if swap_order is None and op_fixture and participant1_name and participant2_name:

@@ -5,6 +5,7 @@ Rich TUI rendering for single-match live monitor.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from typing import Literal
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from rich import box
@@ -16,30 +17,57 @@ from rich.text import Text
 from shared.config import settings
 from .monitor_types import FocusSnapshot, LogBuffer, PerfStats, format_market_label
 
+StrategyMode = Literal["lead_lag", "binary", "both"]
 
-def build_layout() -> Layout:
+
+def _event_tapes_ratios(strategy_mode: StrategyMode) -> tuple[int, int]:
+    """Return (trade_tape_ratio, binary_comp_ratio) from strategy mode."""
+    lead_lag_active = strategy_mode in ("lead_lag", "both")
+    binary_active = strategy_mode in ("binary", "both")
+    if not lead_lag_active and not binary_active:
+        return 1, 0
+    return (1 if lead_lag_active else 0, 1 if binary_active else 0)
+
+
+def build_layout(strategy_mode: StrategyMode = "both") -> Layout:
     layout = Layout()
     layout.split_column(
         Layout(name="header", size=3),
         Layout(name="focus", ratio=3),
         Layout(name="positions", ratio=2),
-        Layout(name="trade_tape", size=8),
+        Layout(name="event_tapes", size=8),
         Layout(name="logs", size=8),
         Layout(name="input", size=3),
     )
+    r_tape, r_comp = _event_tapes_ratios(strategy_mode)
+    layout["event_tapes"].split_row(
+        Layout(name="trade_tape", ratio=r_tape),
+        Layout(name="binary_comp", ratio=r_comp),
+    )
     return layout
+
+
+def apply_strategy_mode_to_layout(layout: Layout, strategy_mode: StrategyMode) -> None:
+    """Update event_tapes row ratios for reselect (same layout object, new mode)."""
+    r_tape, r_comp = _event_tapes_ratios(strategy_mode)
+    layout["event_tapes"].split_row(
+        Layout(name="trade_tape", ratio=r_tape),
+        Layout(name="binary_comp", ratio=r_comp),
+    )
 
 
 def render_layout(
     layout: Layout,
     snapshots: list[FocusSnapshot],
     trade_buffer: LogBuffer,
+    comp_buffer: LogBuffer,
     log_buffer: LogBuffer,
     spread_factor: float,
     perf: PerfStats | None,
     ws_connected: bool,
     mode_label: str,
     input_text: str,
+    paused: bool = False,
     pm_question: str | None = None,
     pm_condition_id: str | None = None,
     positions: list | None = None,
@@ -52,6 +80,7 @@ def render_layout(
                 perf,
                 ws_connected,
                 mode_label=mode_label,
+                paused=paused,
                 pm_question=pm_question,
                 pm_condition_id=pm_condition_id,
             ),
@@ -68,8 +97,11 @@ def render_layout(
         Panel(_build_positions_panel(positions or []), title="Completed Positions")
     )
     layout["trade_tape"].update(Panel(trade_buffer.render(), title="Trade Tape"))
+    layout["binary_comp"].update(Panel(comp_buffer.render(), title="Binary Comp"))
     layout["logs"].update(Panel(log_buffer.render(), title="Logs"))
-    layout["input"].update(Panel(_build_input_panel(input_text), title="Command"))
+    layout["input"].update(
+        Panel(_build_input_panel(input_text, paused=paused), title="Command")
+    )
 
 
 def _build_header(
@@ -77,6 +109,7 @@ def _build_header(
     perf: PerfStats | None,
     ws_connected: bool,
     mode_label: str,
+    paused: bool = False,
     pm_question: str | None = None,
     pm_condition_id: str | None = None,
 ) -> Table:
@@ -90,6 +123,11 @@ def _build_header(
     api_status = "[green]OK[/]" if api_ready else "[yellow]...[/]"
     loop_ms = f"{perf.loop_ms:.0f}ms" if perf and perf.loop_ms else "..."
     time_str = datetime.now(tz=timezone.utc).strftime("%H:%M:%S UTC")
+
+    left_cell = ""
+    if paused:
+        left_cell = "[bold red]PAUSED[/] "
+    left_cell += f"WS: {ws_status} | API: {api_status}"
 
     match_label = snapshot.match if snapshot else "No match selected"
     market_hint = pm_question or ""
@@ -106,7 +144,7 @@ def _build_header(
     if market_hint:
         center_label = f"{center_label} | {market_hint}"
     table.add_row(
-        f"WS: {ws_status} | API: {api_status}",
+        left_cell,
         center_label,
         f"Loop: {loop_ms} | {time_str}",
     )
@@ -143,6 +181,8 @@ def _build_focus_panel(snapshots: list[FocusSnapshot], spread_factor: float) -> 
             if edge is not None:
                 edge_style = "bold green" if edge > 0.02 else "bold red" if edge < -0.02 else ""
             p_ref_value = f"{p_ref:.3f}" if p_ref is not None else "-"
+            if getattr(snapshot, "p_ref_stale", False):
+                p_ref_value = f"{p_ref_value} (stale)" if p_ref_value != "-" else "(stale)"
             p_ref_cell = Text(p_ref_value, style="bold")
             if snapshot.p_ref_source == "derived_series" and p_ref is not None:
                 p_ref_cell = Text(f"{p_ref_value}*", style="bold italic")
@@ -166,6 +206,8 @@ def _build_focus_panel(snapshots: list[FocusSnapshot], spread_factor: float) -> 
             )
     if any(s.p_ref_source == "derived_series" for s in snapshots):
         table.add_row("", "", "", "", "", Text("* derived from series moneyline", style="italic dim"))
+    if any(getattr(s, "p_ref_stale", False) for s in snapshots):
+        table.add_row("", "", "", "", "", Text("P_ref stale (in-play odds not updated)", style="italic dim"))
     return table
 
 
@@ -237,9 +279,11 @@ def _build_positions_panel(positions: list) -> Table | Text:
     return table
 
 
-def _build_input_panel(input_text: str) -> Text:
+def _build_input_panel(input_text: str, paused: bool = False) -> Text:
     text = Text()
-    prompt = "> "
-    display = f"{prompt}{input_text}"
-    text.append(display)
+    if paused:
+        text.append("[bold red]PAUSED[/] — ")
+    text.append("P=pause/unpause | Q=quit")
+    if input_text:
+        text.append(f" | > {input_text}")
     return text

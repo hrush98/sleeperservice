@@ -18,6 +18,7 @@ try:  # pragma: no cover - optional dependency in paper mode
         BalanceAllowanceParams,
         MarketOrderArgs,
         OrderType,
+        PostOrdersArgs,
         PartialCreateOrderOptions,
     )
     from py_clob_client.exceptions import PolyApiException
@@ -29,6 +30,7 @@ except Exception as exc:  # pragma: no cover - handled at runtime
     BalanceAllowanceParams = None
     MarketOrderArgs = None
     OrderType = None
+    PostOrdersArgs = None
     PartialCreateOrderOptions = None
     PolyApiException = None
     BUY = None
@@ -177,6 +179,129 @@ class ClobExecutor:
             tick_size=tick_size,
             order_type=OrderType.FAK,
         )
+
+    def place_fok_order(
+        self,
+        *,
+        token_id: str,
+        side: str,
+        price: float,
+        amount: float,
+        tick_size: float | None = None,
+    ) -> OrderSubmission:
+        return self._place_order(
+            token_id=token_id,
+            side=side,
+            price=price,
+            amount=amount,
+            tick_size=tick_size,
+            order_type=OrderType.FOK,
+        )
+
+    def place_fok_batch(self, orders: list[dict[str, Any]]) -> list[OrderSubmission]:
+        """Place multiple FOK orders in one batch request."""
+        if self.check_kill_switch():
+            return [
+                OrderSubmission(
+                    success=False,
+                    order_id=None,
+                    status="blocked",
+                    error_msg="kill_switch",
+                    raw={"blocked": True, "reason": "kill_switch"},
+                )
+            ]
+        if not orders:
+            return []
+        prepared_orders: list[PostOrdersArgs] = []
+        for order in orders:
+            token_id = str(order.get("token_id") or "")
+            side = str(order.get("side") or "BUY").upper()
+            if side not in {"BUY", "SELL"}:
+                return [
+                    OrderSubmission(
+                        success=False,
+                        order_id=None,
+                        status="error",
+                        error_msg=f"invalid_side:{side}",
+                        raw={"order": order},
+                    )
+                ]
+            normalized_tick = _normalize_tick_size(order.get("tick_size"))
+            price = _quantize_price(float(order.get("price") or 0.0), normalized_tick)
+            amount_raw = float(order.get("amount") or 0.0)
+            amount = (
+                _quantize_usdc_amount(amount_raw)
+                if side == "BUY"
+                else _quantize_market_sell_amount(amount_raw)
+            )
+            if not token_id or price <= 0 or amount <= 0:
+                return [
+                    OrderSubmission(
+                        success=False,
+                        order_id=None,
+                        status="error",
+                        error_msg="invalid_order_payload",
+                        raw={"order": order},
+                    )
+                ]
+            order_args = MarketOrderArgs(
+                token_id=token_id,
+                side=BUY if side == "BUY" else SELL,
+                amount=amount,
+                price=price,
+                order_type=OrderType.FOK,
+            )
+            options = (
+                PartialCreateOrderOptions(tick_size=normalized_tick)
+                if normalized_tick and PartialCreateOrderOptions is not None
+                else None
+            )
+            signed = self._client.create_market_order(order_args, options)
+            prepared_orders.append(
+                PostOrdersArgs(
+                    order=signed,
+                    orderType=OrderType.FOK,
+                    postOnly=bool(order.get("post_only", False)),
+                )
+            )
+        try:
+            response = self._client.post_orders(prepared_orders)
+        except Exception as exc:  # pragma: no cover - network/venue guardrail  # pylint: disable=broad-exception-caught
+            return [
+                OrderSubmission(
+                    success=False,
+                    order_id=None,
+                    status="error",
+                    error_msg=str(exc),
+                    raw={"exception_type": type(exc).__name__, "exception": str(exc)},
+                )
+            ]
+
+        if isinstance(response, list):
+            results: list[OrderSubmission] = []
+            for item in response:
+                payload = item if isinstance(item, dict) else {"raw": item}
+                results.append(
+                    OrderSubmission(
+                        success=bool(payload.get("success", True)),
+                        order_id=payload.get("orderId") or payload.get("orderID"),
+                        status=payload.get("status"),
+                        error_msg=payload.get("errorMsg"),
+                        raw=payload,
+                    )
+                )
+            return results
+
+        payload = response if isinstance(response, dict) else {"raw": response}
+        return [
+            OrderSubmission(
+                success=bool(payload.get("success", True)),
+                order_id=payload.get("orderId") or payload.get("orderID"),
+                status=payload.get("status"),
+                error_msg=payload.get("errorMsg"),
+                raw=payload,
+            )
+        ]
 
     def place_gtc_order(
         self,

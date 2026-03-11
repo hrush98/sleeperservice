@@ -11,7 +11,7 @@ from decimal import Decimal, ROUND_DOWN
 from difflib import SequenceMatcher
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from threading import Lock
+from threading import Event, Lock
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
@@ -65,6 +65,7 @@ class TradeManager:
         log_buffer: LogBuffer,
         trade_buffer: LogBuffer,
         live_private_key: str | None = None,
+        paused_event: Event | None = None,
     ) -> None:
         self._poller = poller
         self._ws_manager = ws_manager
@@ -89,9 +90,11 @@ class TradeManager:
         self._last_live_order_ts: float | None = None
         self._last_balance_reconcile_ts: datetime | None = None
         self._balance_zero_poll_counts: dict[str, int] = {}
+        self._balance_sync_down_state: dict[str, tuple[float, int]] = {}
         self._last_stale_sweep_ts: datetime | None = None
         self._stop: asyncio.Event | None = None
         self._tasks: list[asyncio.Task] = []
+        self._paused_event = paused_event
 
         if trade_mode == "live":
             if not live_private_key:
@@ -473,6 +476,7 @@ class TradeManager:
                     balance=balance,
                     eps=eps,
                     current_count=prior_zero_count,
+                    min_sane_quantity=float(settings.balance_reconcile_min_sane_quantity),
                 )
                 if zero_count > 0:
                     self._balance_zero_poll_counts[position_id] = zero_count
@@ -534,11 +538,83 @@ class TradeManager:
                         )
                     )
                     self._balance_zero_poll_counts.pop(position_id, None)
+                    self._balance_sync_down_state.pop(position_id, None)
                     to_close.append(trade.key)
                     continue
                 self._balance_zero_poll_counts.pop(position_id, None)
+                self._balance_sync_down_state.pop(position_id, None)
                 if abs(balance - trade.quantity) > eps:
                     old_qty = trade.quantity
+                    sync_down = balance < trade.quantity
+                    if sync_down:
+                        entry_event = (
+                            db.execute(
+                                select(TradeEvent)
+                                .where(TradeEvent.position_id == position.id)
+                                .where(TradeEvent.event_type == "ENTRY_CONFIRMED")
+                                .order_by(TradeEvent.ts.desc())
+                                .limit(1)
+                            )
+                            .scalars()
+                            .first()
+                        )
+                        if entry_event and (
+                            now - entry_event.ts
+                        ).total_seconds() < float(
+                            settings.entry_confirmed_sync_cooldown_seconds
+                        ):
+                            event = self._build_trade_event(
+                                event_type="EXIT_RETRY",
+                                now=now,
+                                mapping=self._mapping,
+                                pm_fixture=pm_fixture,
+                                snapshot=snapshot,
+                                side=trade.side,
+                                reason="entry_confirmed_cooldown",
+                                details="entry_confirmed_cooldown",
+                                position_id=position_id,
+                                external_order_id=position.external_order_id,
+                                external_status=position.external_status,
+                                raw_json={"balance": balance, "balance_raw": bal_raw},
+                            )
+                            db.add(event)
+                            continue
+                        last_bal, count = self._balance_sync_down_state.get(
+                            position_id, (None, 0)
+                        )
+                        if last_bal is not None and abs(balance - last_bal) <= eps:
+                            count += 1
+                        else:
+                            count = 1
+                        self._balance_sync_down_state[position_id] = (balance, count)
+                        required_down = max(
+                            int(settings.balance_sync_down_polls_required), 1
+                        )
+                        if count < required_down:
+                            event = self._build_trade_event(
+                                event_type="EXIT_RETRY",
+                                now=now,
+                                mapping=self._mapping,
+                                pm_fixture=pm_fixture,
+                                snapshot=snapshot,
+                                side=trade.side,
+                                reason="balance_sync_down_pending",
+                                details=f"sync_down_poll={count}/{required_down}",
+                                position_id=position_id,
+                                external_order_id=position.external_order_id,
+                                external_status=position.external_status,
+                                raw_json={
+                                    "balance": balance,
+                                    "balance_raw": bal_raw,
+                                    "sync_down_count": count,
+                                    "required_down_polls": required_down,
+                                },
+                            )
+                            db.add(event)
+                            continue
+                        self._balance_sync_down_state.pop(position_id, None)
+                    else:
+                        self._balance_sync_down_state.pop(position_id, None)
                     trade.quantity = balance
                     position.quantity = balance
                     db.add(position)
@@ -565,6 +641,7 @@ class TradeManager:
         ]
         for position_id in stale_ids:
             self._balance_zero_poll_counts.pop(position_id, None)
+            self._balance_sync_down_state.pop(position_id, None)
         if to_close:
             with self._open_trades_lock:
                 for key in to_close:
@@ -694,48 +771,58 @@ class TradeManager:
                     (s for s in snapshots if s.market_type == "match_winner"),
                     snapshots[0],
                 )
-                trigger = self._fixture_states.update_p_ref(
-                    fixture_id, match_snap.p_ref_a, match_snap.p_ref_b, now=now
-                )
+                paused = self._paused_event is not None and self._paused_event.is_set()
+                p_ref_stale = getattr(match_snap, "p_ref_stale", False)
 
-                # If no delta trigger, check edge-based triggers
-                if trigger is None:
-                    match_tkey = _trigger_key(fixture_id, match_snap)
-                    existing = self._triggers.get(match_tkey)
-                    has_active_entry = existing and not existing.entry_done
-                    if not has_active_entry:
-                        # Spike check first (immediate, single poll, ≥4%)
-                        trigger = self._fixture_states.check_edge_spike(
-                            fixture_id,
-                            match_snap.edge.best_edge,
-                            match_snap.edge.best_side,
-                            now=now,
-                        )
-                        # Persist check second (2 consecutive polls ≥3%)
-                        if trigger is None:
-                            trigger = self._fixture_states.check_edge_trigger(
+                if paused or p_ref_stale:
+                    # No trigger events or TRIGGER TradeEvents when paused or P_ref stale
+                    for tkey in list(self._triggers):
+                        if tkey.startswith(fixture_id + ":"):
+                            self._triggers.pop(tkey, None)
+                    trigger = None
+                else:
+                    trigger = self._fixture_states.update_p_ref(
+                        fixture_id, match_snap.p_ref_a, match_snap.p_ref_b, now=now
+                    )
+
+                    # If no delta trigger, check edge-based triggers
+                    if trigger is None:
+                        match_tkey = _trigger_key(fixture_id, match_snap)
+                        existing = self._triggers.get(match_tkey)
+                        has_active_entry = existing and not existing.entry_done
+                        if not has_active_entry:
+                            # Spike check first (immediate, single poll, ≥4%)
+                            trigger = self._fixture_states.check_edge_spike(
                                 fixture_id,
                                 match_snap.edge.best_edge,
                                 match_snap.edge.best_side,
                                 now=now,
                             )
-                        if trigger and existing and existing.entry_done:
-                            # Clear stale done triggers to make room
-                            for snap in snapshots:
-                                tkey = _trigger_key(fixture_id, snap)
-                                self._triggers.pop(tkey, None)
+                            # Persist check second (2 consecutive polls ≥3%)
+                            if trigger is None:
+                                trigger = self._fixture_states.check_edge_trigger(
+                                    fixture_id,
+                                    match_snap.edge.best_edge,
+                                    match_snap.edge.best_side,
+                                    now=now,
+                                )
+                            if trigger and existing and existing.entry_done:
+                                # Clear stale done triggers to make room
+                                for snap in snapshots:
+                                    tkey = _trigger_key(fixture_id, snap)
+                                    self._triggers.pop(tkey, None)
 
-                if trigger:
-                    # Fire trigger for markets that have a reference price or
-                    # are not at price-certainty (no point evaluating dead books).
-                    for snap in snapshots:
-                        if snap.p_ref_a is None and snap.p_ref_b is None:
-                            continue
-                        if _is_market_ended(snap):
-                            continue
-                        tkey = _trigger_key(fixture_id, snap)
-                        if tkey not in self._triggers:
-                            self._triggers[tkey] = TriggerRecord(trigger=trigger, ts=now)
+                    if trigger:
+                        # Fire trigger for markets that have a reference price or
+                        # are not at price-certainty (no point evaluating dead books).
+                        for snap in snapshots:
+                            if snap.p_ref_a is None and snap.p_ref_b is None:
+                                continue
+                            if _is_market_ended(snap):
+                                continue
+                            tkey = _trigger_key(fixture_id, snap)
+                            if tkey not in self._triggers:
+                                self._triggers[tkey] = TriggerRecord(trigger=trigger, ts=now)
 
                 ws_state = await self._ws_manager.get_state_snapshot()
 
@@ -915,6 +1002,20 @@ class TradeManager:
             else:
                 trigger_record.entry_done = True
         if entry_window_open:
+            if self._paused_event and self._paused_event.is_set():
+                trigger_record.entry_done = True
+                self._trade_buffer.add(
+                    _format_trade_line(
+                        event="ENTRY_SKIP",
+                        match=snapshot.match,
+                        market_type=snapshot.market_type,
+                        game_number=snapshot.game_number,
+                        side=None,
+                        details="paused",
+                    )
+                )
+                self._check_for_exits(mapping, pm_fixture, snapshot, now, ended, trigger_record)
+                return
             is_first_check = (now - trigger_record.entry_checked_at).total_seconds() < 0.1
             if orientation_block_reason:
                 trigger_record.entry_done = True
@@ -3537,8 +3638,17 @@ def _seed_balance_reconcile_last_ts(
     return now - timedelta(seconds=interval - first_delay)
 
 
-def _next_balance_zero_poll_count(*, balance: float, eps: float, current_count: int) -> int:
-    if balance <= eps:
+def _next_balance_zero_poll_count(
+    *,
+    balance: float,
+    eps: float,
+    current_count: int,
+    min_sane_quantity: float = 0.0,
+) -> int:
+    effective_zero = balance <= eps or (
+        min_sane_quantity > 0 and balance < min_sane_quantity
+    )
+    if effective_zero:
         return max(int(current_count), 0) + 1
     return 0
 

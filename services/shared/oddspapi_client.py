@@ -600,7 +600,15 @@ class OddsPapiClient:
         for value in values:
             if not value:
                 continue
-            normalized = "".join(ch.lower() for ch in str(value) if ch.isalnum())
+            s = str(value)
+            # Path-style: .../0/moneyline (match), .../1/moneyline (game 1), etc.
+            path_match = re.search(r"/(\d)/(?:moneyline|totals|spreads)", s)
+            if path_match:
+                try:
+                    return int(path_match.group(1))
+                except ValueError:
+                    pass
+            normalized = "".join(ch.lower() for ch in s if ch.isalnum())
             match = re.search(r"(map|game)(\d)", normalized)
             if match:
                 try:
@@ -611,7 +619,8 @@ class OddsPapiClient:
 
     @staticmethod
     def _market_is_game(market: dict, market_id: str | None = None) -> bool:
-        return OddsPapiClient._market_game_number(market, market_id) is not None
+        gn = OddsPapiClient._market_game_number(market, market_id)
+        return gn is not None and gn != 0
 
     @staticmethod
     def parse_fixture_status(status_id: int | None) -> str:
@@ -668,6 +677,53 @@ class OddsPapiClient:
         if true_start:
             return True
         return payload.get("statusId") == 1
+
+    @staticmethod
+    def get_pinnacle_p_ref_changed_at(
+        odds_payload: dict,
+        market_type: str,
+        game_number: int | None = None,
+    ) -> datetime | None:
+        """Return the latest Pinnacle update time for the market used for P_ref (for staleness checks).
+
+        Uses home/away changed_at from match moneyline or game winner market; fallback to payload updatedAt.
+        Returns timezone-aware UTC datetime, or None if no timestamp available.
+        """
+        def _parse_iso(s: str | None) -> datetime | None:
+            if not s or not isinstance(s, str):
+                return None
+            s = s.strip().replace("Z", "+00:00")
+            try:
+                dt = datetime.fromisoformat(s)
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
+                return dt
+            except (ValueError, TypeError):
+                return None
+
+        if market_type == "match_winner":
+            parsed = OddsPapiClient.extract_pinnacle_moneyline(odds_payload)
+        elif market_type == "game_winner" and game_number is not None:
+            parsed = OddsPapiClient.extract_pinnacle_game_winner(odds_payload, game_number)
+            if not parsed:
+                parsed = OddsPapiClient.extract_pinnacle_moneyline(odds_payload)
+        else:
+            parsed = OddsPapiClient.extract_pinnacle_moneyline(odds_payload)
+
+        if isinstance(parsed, dict):
+            home = parsed.get("home") if isinstance(parsed.get("home"), dict) else {}
+            away = parsed.get("away") if isinstance(parsed.get("away"), dict) else {}
+            t1 = _parse_iso(home.get("changed_at"))
+            t2 = _parse_iso(away.get("changed_at"))
+            if t1 and t2:
+                return max(t1, t2)
+            if t1:
+                return t1
+            if t2:
+                return t2
+
+        fallback = odds_payload.get("updatedAt")
+        return _parse_iso(fallback)
 
 
 class AsyncCooldownTracker:

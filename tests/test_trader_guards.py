@@ -115,6 +115,46 @@ def test_orientation_entry_block_reason_blocks_conflict(monkeypatch) -> None:
     assert _orientation_entry_block_reason(snap) == "orientation_conflict"
 
 
+def test_orientation_entry_block_reason_blocks_derived_inplay(monkeypatch) -> None:
+    """Derived-series entries are blocked when the match is live."""
+    monkeypatch.setattr(settings, "orientation_anchor_require_lock_for_entry", True)
+    monkeypatch.setattr(settings, "derived_game_block_inplay", True)
+    snap = _snapshot(bid_a=0.50, ask_a=0.51, bid_b=0.49, ask_b=0.50)
+    snap.p_ref_source = "derived_series"
+    snap.pin_is_inplay = True
+    assert _orientation_entry_block_reason(snap) == "derived_inplay"
+
+
+def test_orientation_entry_block_reason_allows_derived_prematch(monkeypatch) -> None:
+    """Derived-series entries are allowed pre-match (not in-play)."""
+    monkeypatch.setattr(settings, "orientation_anchor_require_lock_for_entry", True)
+    monkeypatch.setattr(settings, "derived_game_block_inplay", True)
+    snap = _snapshot(bid_a=0.50, ask_a=0.51, bid_b=0.49, ask_b=0.50)
+    snap.p_ref_source = "derived_series"
+    snap.pin_is_inplay = False
+    assert _orientation_entry_block_reason(snap) is None
+
+
+def test_orientation_entry_block_reason_allows_direct_inplay(monkeypatch) -> None:
+    """Direct Pinnacle game-level odds are NOT blocked when live."""
+    monkeypatch.setattr(settings, "orientation_anchor_require_lock_for_entry", True)
+    monkeypatch.setattr(settings, "derived_game_block_inplay", True)
+    snap = _snapshot(bid_a=0.50, ask_a=0.51, bid_b=0.49, ask_b=0.50)
+    snap.p_ref_source = "direct"
+    snap.pin_is_inplay = True
+    assert _orientation_entry_block_reason(snap) is None
+
+
+def test_orientation_entry_block_reason_derived_inplay_gate_disabled(monkeypatch) -> None:
+    """Config flag can disable the derived-inplay gate."""
+    monkeypatch.setattr(settings, "orientation_anchor_require_lock_for_entry", True)
+    monkeypatch.setattr(settings, "derived_game_block_inplay", False)
+    snap = _snapshot(bid_a=0.50, ask_a=0.51, bid_b=0.49, ask_b=0.50)
+    snap.p_ref_source = "derived_series"
+    snap.pin_is_inplay = True
+    assert _orientation_entry_block_reason(snap) is None
+
+
 def test_build_entry_candidate_uses_totals_strict_spread(monkeypatch) -> None:
     monkeypatch.setattr(settings, "pm_book_stale_seconds", 5.0)
     monkeypatch.setattr(settings, "max_spread", 0.20)

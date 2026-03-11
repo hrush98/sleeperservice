@@ -245,6 +245,7 @@ class Position(Base):
         UUID(as_uuid=True), ForeignKey("fixtures.id"), nullable=True
     )
     mode: Mapped[str] = mapped_column(String, nullable=False, default="paper")
+    strategy: Mapped[str] = mapped_column(String, nullable=False, default="lead_lag")
     venue: Mapped[str | None] = mapped_column(String, nullable=True)
     market_type: Mapped[str] = mapped_column(String, nullable=False)
     game_number: Mapped[int | None] = mapped_column(nullable=True)
@@ -282,6 +283,7 @@ class Position(Base):
 
     __table_args__ = (
         Index("ix_positions_mapping_opened", "mapping_id", "opened_at"),
+        Index("ix_positions_strategy_opened", "strategy", "opened_at"),
         Index("ix_positions_opened", "opened_at"),
         Index("ix_positions_closed", "closed_at"),
     )
@@ -298,6 +300,7 @@ class OrderAttempt(Base):
     )
     run_id: Mapped[str] = mapped_column(UUID(as_uuid=True), nullable=False)
     mode: Mapped[str] = mapped_column(String, nullable=False)
+    strategy: Mapped[str] = mapped_column(String, nullable=False, default="lead_lag")
 
     phase: Mapped[str] = mapped_column(String, nullable=False)  # "entry" | "exit"
     side: Mapped[str] = mapped_column(String, nullable=False)  # "BUY" | "SELL"
@@ -336,6 +339,7 @@ class OrderAttempt(Base):
             postgresql_where=text("finalized_at IS NULL"),
         ),
         Index("ix_order_attempts_external_order_id", "external_order_id"),
+        Index("ix_order_attempts_strategy_submitted", "strategy", "submitted_at"),
     )
 
 
@@ -349,6 +353,7 @@ class TradeEvent(Base):
     run_id: Mapped[str] = mapped_column(UUID(as_uuid=True), nullable=False)
     event_type: Mapped[str] = mapped_column(String, nullable=False)
     mode: Mapped[str] = mapped_column(String, nullable=False)
+    strategy: Mapped[str] = mapped_column(String, nullable=False, default="lead_lag")
 
     mapping_id: Mapped[str | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("mappings.id"), nullable=True
@@ -407,6 +412,56 @@ class TradeEvent(Base):
         Index("ix_trade_events_mapping_ts", "mapping_id", "ts"),
         Index("ix_trade_events_position_ts", "position_id", "ts"),
         Index("ix_trade_events_run_ts", "run_id", "ts"),
+        Index("ix_trade_events_strategy_ts", "strategy", "ts"),
+    )
+
+
+class ComplementArb(Base):
+    """Two-leg binary complement arb lifecycle record."""
+
+    __tablename__ = "complement_arbs"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    run_id: Mapped[str] = mapped_column(UUID(as_uuid=True), nullable=False)
+    mapping_id: Mapped[str] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("mappings.id"), nullable=False
+    )
+    pm_fixture_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("fixtures.id"), nullable=True
+    )
+    market_type: Mapped[str] = mapped_column(String, nullable=False)
+    game_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    mode: Mapped[str] = mapped_column(String, nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False, default="IDLE")
+
+    leg_a_position_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("positions.id"), nullable=True
+    )
+    leg_b_position_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("positions.id"), nullable=True
+    )
+
+    vwap_a: Mapped[float | None] = mapped_column(Float, nullable=True)
+    vwap_b: Mapped[float | None] = mapped_column(Float, nullable=True)
+    target_size: Mapped[float | None] = mapped_column(Float, nullable=True)
+    locked_edge: Mapped[float | None] = mapped_column(Float, nullable=True)
+    actual_cost_a: Mapped[float | None] = mapped_column(Float, nullable=True)
+    actual_cost_b: Mapped[float | None] = mapped_column(Float, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolution_pnl: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    raw_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+    mapping: Mapped[Mapping] = relationship("Mapping")
+    pm_fixture: Mapped[Fixture | None] = relationship("Fixture", foreign_keys=[pm_fixture_id])
+    leg_a_position: Mapped[Position | None] = relationship("Position", foreign_keys=[leg_a_position_id])
+    leg_b_position: Mapped[Position | None] = relationship("Position", foreign_keys=[leg_b_position_id])
+
+    __table_args__ = (
+        Index("ix_complement_arbs_mapping_created", "mapping_id", "created_at"),
+        Index("ix_complement_arbs_state_created", "state", "created_at"),
+        Index("ix_complement_arbs_run_created", "run_id", "created_at"),
     )
 
 

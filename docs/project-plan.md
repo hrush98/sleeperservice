@@ -60,6 +60,10 @@ Mappings created: 6 (high confidence), 2 (review needed)
 ### Mode 2: Live Monitor (during matches)
 Runs when a mapped match goes live. The operator picks the match up front; the monitor only watches that match.
 
+The live process now supports two concurrent strategy managers over the same focused match:
+- `lead_lag` (reference-prob driven)
+- `complement_arb` (binary complement: `ask(A)+ask(B)<1`, depth-aware, FOK)
+
 **For the selected mapped match:**
 1. Poll OddsPapi `/v4/odds?fixtureId=X` for Pinnacle prices
 2. Extract **moneyline** and **game winner** (Game 1/2/3) prices
@@ -73,7 +77,7 @@ Runs when a mapped match goes live. The operator picks the match up front; the m
 - The live monitor polls, renders, and trades only that single match.
 - Use `r` to re-select without restarting the process.
 - Discovery remains separate; it only populates the DB for selection.
-- Live balance reconciliation uses a fast first probe (~3s) and only applies `balance_reconciled` after consecutive zero-balance confirmations on the 30s cadence.
+- Live balance reconciliation uses a fast first probe (~3s) and only applies `balance_reconciled` after consecutive zero-balance confirmations on the 30s cadence. No one-shot sync to zero or below a floor; sync-down requires ENTRY_CONFIRMED cooldown and multiple consecutive polls (see `docs/adr/balance-sync-safeguards.md`).
 - Conservative default guards are enabled for live entry quality:
   - `max_spread` blocks wide books,
   - `pm_book_stale_seconds` blocks stale WS books,
@@ -182,6 +186,7 @@ OddsPapi sportId for CS2: **17**
 - `mapping_id` (fk → mappings.id)
 - `pm_fixture_id` (fk → fixtures.id)
 - `mode` (text; "paper" | "real")
+- `strategy` (text; "lead_lag" | "complement_arb")
 - `venue` (text nullable)
 - `market_type` (text)
 - `game_number` (int nullable)
@@ -213,6 +218,7 @@ OddsPapi sportId for CS2: **17**
 - `run_id` (uuid)
 - `event_type` (text)
 - `mode` (text)
+- `strategy` (text; "lead_lag" | "complement_arb")
 - `mapping_id` (fk → mappings.id)
 - `pm_fixture_id` (fk → fixtures.id)
 - `position_id` (fk → positions.id, nullable)
@@ -228,6 +234,30 @@ OddsPapi sportId for CS2: **17**
 - `quantity`, `limit_price`, `avg_fill_price`, `size_available`, `net_edge` (double precision nullable)
 - `exit_price`, `pnl_percent`, `convergence_seconds` (double precision nullable)
 - `external_order_id`, `external_fill_id`, `external_status` (text nullable)
+- `raw_json` (jsonb)
+
+### order_attempts
+- `id` (uuid pk)
+- `position_id` (fk → positions.id)
+- `run_id` (uuid)
+- `mode` (text)
+- `strategy` (text; "lead_lag" | "complement_arb")
+- `phase`, `side`, `token_id`, `attempt_seq`
+- `submitted_at`, `limit_price`, `requested_size`
+- `external_order_id`, `external_status`, `matched_size`
+- `finalized_at`, `final_state`, `final_reason`
+- `raw_json` (jsonb)
+
+### complement_arbs
+- `id` (uuid pk)
+- `run_id` (uuid)
+- `mapping_id` (fk → mappings.id)
+- `pm_fixture_id` (fk → fixtures.id)
+- `market_type`, `game_number`, `mode`, `state`
+- `leg_a_position_id`, `leg_b_position_id` (fk → positions.id)
+- `vwap_a`, `vwap_b`, `target_size`, `locked_edge`
+- `actual_cost_a`, `actual_cost_b`
+- `created_at`, `resolved_at`, `resolution_pnl`
 - `raw_json` (jsonb)
 
 ---

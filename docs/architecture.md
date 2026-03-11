@@ -131,12 +131,19 @@ Additionally, discovery persists an orientation anchor in `mappings.match_detail
 8. (Optional, live mode)
    Place FAK market orders via CLOB client (buy by USDC amount, sell by shares)
    → Record submitted positions, then confirm fills via reconciliation
+
+### Strategy managers (shared data, isolated logic)
+- `TradeManager` (`lead_lag`) and `ComplementArbManager` (`complement_arb`) run concurrently in the same live process.
+- Both consume the same focused snapshots/books from `SingleMatchPoller` + `PolymarketWSManager`.
+- Complement arb uses depth-aware fill math (`VWAP`) and submits FOK orders (including batch placement) with explicit one-leg mitigation flow.
+- Trade storage is shared (`positions`, `order_attempts`, `trade_events`) with strategy attribution, plus `complement_arbs` for two-leg lifecycle state.
 ```
 
 ### Exit reconciliation (live mode)
 - Normalize conditional token balances from raw on-chain units using configured token decimals.
 - Run the first balance probe after a short warmup (`balance_first_poll_delay_seconds`, default 3s), then continue on the regular cadence (`balance_poll_interval_seconds`, default 30s).
 - Require multiple consecutive zero-balance probes (`balance_reconcile_zero_polls_required`, default 3 total polls: initial + 2 follow-ups) before auto-closing with `balance_reconciled`.
+- **Balance sync safeguards** (see `docs/adr/balance-sync-safeguards.md`): (1) Balances below `balance_reconcile_min_sane_quantity` (default 0.01) use the zero-poll path only—no one-shot sync to zero/floor. (2) Within `entry_confirmed_sync_cooldown_seconds` (default 90s) after last ENTRY_CONFIRMED, do not overwrite quantity with a lower balance. (3) Sync-down (balance &lt; current quantity) is applied only after the same lower balance is seen for `balance_sync_down_polls_required` (default 2) consecutive polls.
 - If REST order status is unavailable, fall back to user WS recovery by asset+side after phantom order-id threshold.
 - On repeated timeouts with remaining balance, reopen the trade for retry with cooldown and max-attempt guardrails.
 - Repeated phantom order-id failures are finalized and reopened as fresh retries to avoid non-finalized reconciliation loops.
@@ -243,6 +250,10 @@ Polymarket WS book state ───────► top-of-book + depth (in-memory
 | shadow_orders | Paper trade decisions (legacy) | Append-only |
 | positions | Trade lifecycle (paper/real) | Append-only + update on exit |
 | trade_events | Trade decision/execution tape | Append-only |
+
+Additional execution tables:
+- `order_attempts` — per-order execution attempt lifecycle (entry/exit, retries, external status)
+- `complement_arbs` — two-leg complement arb lifecycle linking both legs and arb-level state
 
 ---
 

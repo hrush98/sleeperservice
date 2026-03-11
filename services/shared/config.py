@@ -79,6 +79,8 @@ class Settings(BaseSettings):
 
     # Pinnacle display classification
     pin_pre_fresh_minutes: int = 10
+    # In-play P_ref staleness: max age (seconds) of Pinnacle odds when in-play; if older, P_ref is stale.
+    p_ref_stale_seconds_inplay: float = 120.0
     starting_soon_minutes: int = 15
     starting_soon_grace_minutes: int = 60
     # Consider a market "done" when one side is near 1.0 and the other near 0.0.
@@ -137,6 +139,7 @@ class Settings(BaseSettings):
     orientation_anchor_use_oddspapi_ids: bool = True
     orientation_anchor_require_lock_for_entry: bool = True
     orientation_anchor_conflict_polls: int = 3
+    orientation_manual_confirm_skip_if_set: bool = True  # Skip prompt when source is manual_focus_confirm
 
     # Live monitoring
     monitor_poll_interval_seconds: int = 5
@@ -147,8 +150,19 @@ class Settings(BaseSettings):
     trade_loop_hot_seconds: float = 0.05
     entry_reeval_seconds: float = 3.0
 
+    # Binary complement arb
+    complement_arb_enabled: bool = False
+    complement_min_edge: float = 0.02
+    complement_max_size: float = 25.0
+    complement_fill_price_buffer: float = 0.005
+    complement_stale_threshold_ms: int = 1000
+    complement_min_edge_duration_ms: int = 300
+    complement_retry_timeout_secs: int = 60
+    complement_unwind_cost_threshold: float = 0.02
+    complement_scan_interval_ms: int = 500
+
     # Live trading safeguards (only used in live mode)
-    live_max_usd_per_order: float = 25.0
+    live_max_usd_per_order: float = 5.0
     live_max_shares_per_order: float = 1000.0
     live_max_open_positions: int = 5
     live_min_seconds_between_orders: float = 3.0
@@ -175,6 +189,9 @@ class Settings(BaseSettings):
     balance_first_poll_delay_seconds: float = 3.0
     balance_poll_interval_seconds: float = 30.0
     balance_reconcile_zero_polls_required: int = 3
+    balance_reconcile_min_sane_quantity: float = 0.01
+    entry_confirmed_sync_cooldown_seconds: float = 90.0
+    balance_sync_down_polls_required: int = 2
     stale_position_sweep_seconds: float = 300.0
     delayed_grace_seconds: float = 5.0
     delayed_retry_cooldown_seconds: float = 2.0

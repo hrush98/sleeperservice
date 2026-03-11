@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from enum import Enum
 from threading import Lock
 
 from rich.text import Text
@@ -53,6 +54,7 @@ class FocusSnapshot:
     orientation_source: str | None = None
     orientation_conflict: bool = False
     pin_is_inplay: bool = False
+    p_ref_stale: bool = False
 
 
 @dataclass
@@ -125,6 +127,53 @@ class PaperTrade:
     external_status: str | None = None
     delayed_retries: int = 0
     last_retry_ts: datetime | None = None
+
+
+class ComplementArbState(str, Enum):
+    IDLE = "IDLE"
+    SUBMITTING = "SUBMITTING"
+    BOTH_FILLED = "BOTH_FILLED"
+    LEG_A_ONLY = "LEG_A_ONLY"
+    RETRYING_B = "RETRYING_B"
+    UNWINDING_A = "UNWINDING_A"
+    RESOLVED = "RESOLVED"
+    FAILED = "FAILED"
+
+
+@dataclass
+class ComplementArbSignal:
+    mapping_id: str
+    market_id: str
+    market_type: str | None
+    game_number: int | None
+    token_id_a: str
+    token_id_b: str
+    vwap_a: float
+    vwap_b: float
+    fillable_size: float
+    edge: float
+    detected_at: datetime
+
+
+@dataclass
+class ComplementArbRecord:
+    key: str
+    mapping_id: str
+    market_id: str
+    market_type: str | None
+    game_number: int | None
+    token_id_a: str
+    token_id_b: str
+    state: ComplementArbState
+    created_at: datetime
+    updated_at: datetime
+    edge: float | None = None
+    target_size: float | None = None
+    vwap_a: float | None = None
+    vwap_b: float | None = None
+    position_id_a: str | None = None
+    position_id_b: str | None = None
+    db_id: str | None = None
 
 
 class LogBuffer:

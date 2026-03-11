@@ -169,6 +169,28 @@ def test_next_balance_zero_poll_count_resets_on_positive_balance() -> None:
     assert count == 0
 
 
+def test_next_balance_zero_poll_count_below_min_sane_quantity_increments() -> None:
+    # balance above eps but below floor -> treat as effective zero, increment count
+    count = _next_balance_zero_poll_count(
+        balance=0.005,
+        eps=0.0001,
+        current_count=0,
+        min_sane_quantity=0.01,
+    )
+    assert count == 1
+
+
+def test_next_balance_zero_poll_count_at_or_above_min_sane_quantity_resets() -> None:
+    # balance at or above floor and above eps -> not effective zero, reset count
+    count = _next_balance_zero_poll_count(
+        balance=0.02,
+        eps=0.0001,
+        current_count=2,
+        min_sane_quantity=0.01,
+    )
+    assert count == 0
+
+
 def test_classify_exit_timeout_balance_outcome_balance_zero() -> None:
     outcome, filled_qty = _classify_exit_timeout_balance_outcome(
         balance=0.0,
