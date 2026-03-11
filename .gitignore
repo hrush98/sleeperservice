@@ -26,6 +26,7 @@ migrations/**/__pycache__/
 logs/
 
 tmp_*.json
+services/coherence/coherence_cache.json
 
 notes.odt
 .~lock.notes.odt#
