@@ -13,6 +13,7 @@ Relationship to the older docs:
 - `docs/coherence/` remains the detailed design area for the coherence scanner until that strategy is absorbed into the shared platform.
 
 Index:
+- `implementation-roadmap.md` - primary mutable execution document for the restructure
 - `target-architecture.md` - concrete target system shape
 - `engineering-improvements.md` - codebase cleanup and platform hardening roadmap
 - `future-strategy-avenues.md` - prioritized expansion lanes, with emphasis on Polymarket-native strategies
