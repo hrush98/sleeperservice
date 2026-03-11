@@ -34,6 +34,54 @@ def devig_two_way_decimal(odds_a: float, odds_b: float) -> tuple[float, float]:
     return q_a / total, q_b / total
 
 
+def _bo3_series_prob(game_prob: float) -> float:
+    """Probability of winning a Bo3 given per-game win probability."""
+    q = min(max(game_prob, 0.0), 1.0)
+    return (3.0 * q * q) - (2.0 * q * q * q)
+
+
+def _bo5_series_prob(game_prob: float) -> float:
+    """Probability of winning a Bo5 given per-game win probability."""
+    q = min(max(game_prob, 0.0), 1.0)
+    return (10.0 * q**3) - (15.0 * q**4) + (6.0 * q**5)
+
+
+def series_prob_to_game_prob(p_series: float, series_type: str | None) -> float | None:
+    """Infer per-game win probability from series moneyline probability.
+
+    Uses binary search over closed-form Bo3/Bo5 series win equations.
+    Returns ``None`` for bo1/unknown formats.
+    """
+    if series_type is None:
+        return None
+
+    normalized = series_type.lower().strip()
+    if normalized == "bo1":
+        return None
+    if normalized == "bo3":
+        series_prob_fn = _bo3_series_prob
+    elif normalized == "bo5":
+        series_prob_fn = _bo5_series_prob
+    else:
+        return None
+
+    target = min(max(float(p_series), 0.0), 1.0)
+    if target <= 0.0:
+        return 0.0
+    if target >= 1.0:
+        return 1.0
+    low = 0.0
+    high = 1.0
+    for _ in range(50):
+        mid = (low + high) / 2.0
+        mid_prob = series_prob_fn(mid)
+        if mid_prob < target:
+            low = mid
+        else:
+            high = mid
+    return (low + high) / 2.0
+
+
 def compute_net_edges(
     p_ref_a: float | None,
     p_ref_b: float | None,

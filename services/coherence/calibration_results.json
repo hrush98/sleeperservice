@@ -1,0 +1,72 @@
+{
+  "labels_by_threshold": {
+    "0.88": {
+      "false": 8,
+      "skip": 0,
+      "true": 0
+    },
+    "0.90": {
+      "false": 8,
+      "skip": 0,
+      "true": 0
+    },
+    "0.92": {
+      "false": 7,
+      "skip": 0,
+      "true": 0
+    },
+    "0.94": {
+      "false": 7,
+      "skip": 0,
+      "true": 0
+    }
+  },
+  "min_distinct_dates": 2,
+  "recommendation": "Best observed manual precision at threshold=0.88 (precision=0.00%).",
+  "require_description_consistency": true,
+  "sample_size": 20,
+  "stats_by_threshold": [
+    {
+      "accepted_total": 141,
+      "fallback_accepted": 8,
+      "rejected": 992,
+      "rejected_by_dates": 983,
+      "rejected_by_descriptions": 7,
+      "strict_accepted": 133,
+      "threshold": 0.88
+    },
+    {
+      "accepted_total": 141,
+      "fallback_accepted": 8,
+      "rejected": 992,
+      "rejected_by_dates": 983,
+      "rejected_by_descriptions": 7,
+      "strict_accepted": 133,
+      "threshold": 0.9
+    },
+    {
+      "accepted_total": 140,
+      "fallback_accepted": 7,
+      "rejected": 993,
+      "rejected_by_dates": 983,
+      "rejected_by_descriptions": 7,
+      "strict_accepted": 133,
+      "threshold": 0.92
+    },
+    {
+      "accepted_total": 140,
+      "fallback_accepted": 7,
+      "rejected": 993,
+      "rejected_by_dates": 983,
+      "rejected_by_descriptions": 7,
+      "strict_accepted": 133,
+      "threshold": 0.94
+    }
+  ],
+  "thresholds": [
+    0.88,
+    0.9,
+    0.92,
+    0.94
+  ]
+}

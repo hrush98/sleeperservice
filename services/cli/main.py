@@ -6,12 +6,16 @@ Usage:
     python -m cli live
 """
 
+# pylint: disable=not-callable
+
 import logging
 
 import typer
 
 from cli.analyze import analyze_command
 from cli.discover import discover_command
+from cli.gold_edge import analyze_command as analyze_gold_edge_command
+from cli.gold_edge import cache_daily_command, collect_live_command, probe_command
 from cli.live import live_command
 
 # Configure logging
@@ -197,6 +201,86 @@ def analyze(
         limit=limit,
         include_events=include_events,
     )
+
+
+@app.command("gold-probe")
+def gold_probe(
+    duration_minutes: int = typer.Option(120, "--minutes", "-m", help="How long to probe live feed"),
+    poll_seconds: float | None = typer.Option(
+        None, "--poll-seconds", "-p", help="Goalserve poll interval override"
+    ),
+):
+    """Phase 0: probe Goalserve live LoL updates."""
+    try:
+        probe_command(duration_minutes=duration_minutes, poll_seconds=poll_seconds)
+    except KeyboardInterrupt:
+        typer.echo("\nGold probe stopped.")
+        raise typer.Exit(code=0)
+    except Exception as e:
+        typer.secho(f"Error: {e}", fg=typer.colors.RED, err=True)
+        logging.exception("Gold probe failed")
+        raise typer.Exit(code=1)
+
+
+@app.command("gold-collect-live")
+def gold_collect_live(
+    duration_minutes: int = typer.Option(240, "--minutes", "-m", help="How long to run collector"),
+    poll_seconds: float | None = typer.Option(
+        None, "--poll-seconds", "-p", help="Goalserve poll interval override"
+    ),
+    trade_mode: str = typer.Option(
+        "none",
+        "--trade-mode",
+        help="none|paper|live",
+    ),
+    stake_usd: float | None = typer.Option(
+        None,
+        "--stake-usd",
+        help="Stake per trade (defaults to settings.gold_edge_default_stake_usd)",
+    ),
+):
+    """Phase 1 + optional Phase 4/5: collect live snapshots and optional paper/live trades."""
+    try:
+        collect_live_command(
+            duration_minutes=duration_minutes,
+            poll_seconds=poll_seconds,
+            trade_mode=trade_mode,
+            stake_usd=stake_usd,
+        )
+    except KeyboardInterrupt:
+        typer.echo("\nGold collector stopped.")
+        raise typer.Exit(code=0)
+    except Exception as e:
+        typer.secho(f"Error: {e}", fg=typer.colors.RED, err=True)
+        logging.exception("Gold live collector failed")
+        raise typer.Exit(code=1)
+
+
+@app.command("gold-cache-daily")
+def gold_cache_daily(
+    days_back: int = typer.Option(0, "--days-back", "-d", help="0=today, 1=yesterday, ..."),
+):
+    """Phase 2: cache finished-game outcomes by day."""
+    try:
+        cache_daily_command(days_back=days_back)
+    except Exception as e:
+        typer.secho(f"Error: {e}", fg=typer.colors.RED, err=True)
+        logging.exception("Gold daily cache failed")
+        raise typer.Exit(code=1)
+
+
+@app.command("gold-analyze")
+def gold_analyze(
+    days: int = typer.Option(14, "--days", "-d", help="Lookback window"),
+    min_samples: int = typer.Option(20, "--min-samples", help="Minimum bucket sample size"),
+):
+    """Phase 3: analyze gold-diff win rates and threshold candidates."""
+    try:
+        analyze_gold_edge_command(days=days, min_samples=min_samples)
+    except Exception as e:
+        typer.secho(f"Error: {e}", fg=typer.colors.RED, err=True)
+        logging.exception("Gold analysis failed")
+        raise typer.Exit(code=1)
 
 
 def main():

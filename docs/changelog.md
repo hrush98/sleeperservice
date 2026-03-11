@@ -20,6 +20,150 @@ flowchart TD
   poller -->|focus_only| ws[Polymarket_WS_subscriptions]
   trader -->|focus_only| trading[TradeSignals_and_CLOB_exec]
 
+## 2026-02-13 — Totals (Over/Under) markets integrated for live monitor/trading
+
+### What changed
+- Added totals market support end-to-end for Polymarket discovery, mapping side-map keys, live market loading, and TUI display.
+- Added `Fixture.line_value` with migration `0013_add_fixture_line_value` and index `ix_fixtures_market_type_line_value`.
+- Added OddsPapi Pinnacle totals parser (`extract_pinnacle_totals`) for outcome IDs like `3.5/over` and `3.5/under`.
+- Poller now computes `p_ref_a/p_ref_b` for totals from direct Pinnacle totals when line matches PM market.
+- Added totals-specific strict entry gates (`totals_alpha_min`, `totals_alpha_spread_factor`, `totals_max_spread`, `totals_min_book_depth_usd`) used by trader entry evaluation.
+
+### Design decisions
+- Totals v1 uses direct OddsPapi Pinnacle totals only (no synthetic derivation) to avoid model risk.
+- Keep trigger source as match-winner p_ref; totals markets evaluate entries independently on trigger propagation.
+- Use canonical side ordering for totals: side A = OVER, side B = UNDER.
+
+flowchart TD
+  discover[Discovery] --> classify[Classify_PM_Market]
+  classify --> match[match_winner]
+  classify --> games[game_winner]
+  classify --> totals[totals_line]
+  totals --> fixtures[Fixtures_with_line_value]
+  fixtures --> sideMap[MarketSideMap_totals_keys]
+  poller[LivePoller] --> oddspapi[OddsPapi_Pinnacle]
+  oddspapi --> totalsPref[Extract_Totals_p_ref]
+  totalsPref --> trader[TraderEntryEval]
+  trader --> strictTotals[Totals_Strict_Gates]
+
+### Why
+LCP and similar esports events often expose PM totals lines with poor liquidity but actionable spread dislocations. Adding direct Pinnacle totals references expands tradable surface while preserving conservative guardrails.
+
+### Impact
+- Live focus now includes totals markets (line-aware).
+- Totals entries use stricter depth/spread/alpha thresholds than default markets.
+- DB migration required (`0013_add_fixture_line_value`) before running discovery/live.
+
+### How to verify
+- `conda run -n poly pytest -q tests/test_oddspapi_totals.py`
+- `conda run -n poly pytest -q tests/test_discover.py tests/test_trader_guards.py`
+- `conda run -n poly python -m cli discover --days 1`
+  - Expect polymarket totals fixtures with `market_type=totals` and `line_value` set.
+- `conda run -n poly python -m cli live`
+  - Expect `TOTAL <line>` rows with `OVER/UNDER` sides in focus panel.
+
+## 2026-02-13 — Series-to-game derived p_ref + tighter derived entry gates
+
+### What changed
+- Added `series_prob_to_game_prob()` in `services/shared/edge.py` to invert bo3/bo5 series moneyline into per-game probability.
+- Updated `services/cli/poller.py` so game-winner markets derive p_ref from match moneyline when direct game odds are unavailable, and tag snapshot source as `derived_series`.
+- Added `p_ref_source` to `FocusSnapshot` and updated the live focus panel to render derived values with `*` plus a legend.
+- Added stricter derived entry guardrails in `services/shared/config.py` and applied them in `services/cli/trader.py` (`derived_game_alpha_min`, `derived_game_alpha_spread_factor`, `derived_game_max_spread`, `derived_game_min_book_depth_usd`).
+- Added `tests/test_series_game_prob.py` to validate bo3/bo5 inversion values and roundtrip consistency.
+
+### Design decisions
+- Keep derived p_ref as an explicit fallback only when direct game lines are missing.
+- Preserve direct final-game fallback path (`final_game_fallback`) when derivation is unavailable.
+- Apply stricter entry gates only when `p_ref_source=derived_series` to reduce model-risk trades.
+
+flowchart TD
+  moneyline[OddsPapi_match_moneyline] --> devig[Devig_series_prob]
+  devig --> directCheck{Direct_game_odds_available}
+  directCheck -->|yes| directRef[Use_direct_game_p_ref]
+  directCheck -->|no| deriveRef[Invert_bo3_bo5_to_game_prob]
+  deriveRef --> tagged[FocusSnapshot_p_ref_source_derived_series]
+  directRef --> taggedDirect[FocusSnapshot_p_ref_source_direct]
+  tagged --> traderGates[Trader_derived_game_gates]
+  taggedDirect --> traderDefault[Trader_default_gates]
+
+### Why
+Game-level esports books are frequently missing or stale in OddsPapi, while PM game markets still trade. Deriving game p_ref from the series moneyline recovers actionable signal coverage with explicit, safer gating.
+
+### Impact
+- Game-winner markets can now receive p_ref even when direct game odds are missing.
+- Derived game entries are harder to trigger by design (higher alpha + tighter spread/depth requirements).
+- No DB migration required.
+
+### How to verify
+- `conda run -n poly pytest -q tests/test_series_game_prob.py`
+  - Expected: all tests pass.
+- `conda run -n poly pytest -q tests/test_trader_guards.py`
+  - Expected: existing guard tests still pass.
+- `conda run -n poly python -m cli live`
+  - In focus panel, expect `*` marker and legend line when game p_ref is derived from series moneyline.
+
+## 2026-02-13 — Orientation anchor lock + entry safety gate
+
+### What changed
+- Discovery now persists an orientation anchor in `mappings.match_details` (`orientation_locked`, `team_a_is_home`, `home_team`, `away_team`, `orientation_anchor_source`, `orientation_anchor_confidence`, `orientation_anchor_reason`, `orientation_anchor_ts`).
+- Discovery computes anchor primarily from GoalServe pre-match local/away team identity and falls back to OddsPapi player IDs when available.
+- Poller now applies locked orientation deterministically when mapping OddsPapi `home/away` prices to side A/B and tracks repeated conflict polls.
+- Trader now enforces an orientation safety gate: if orientation is unlocked or conflicting, entry is blocked with `ENTRY_SKIP` (`orientation_unlocked` / `orientation_conflict`).
+- Added config toggles and thresholds for orientation anchor behavior in `services/shared/config.py`.
+
+### Design decisions
+- Keep orientation metadata in `mappings.match_details` JSON for backward compatibility and zero migration risk.
+- Prefer safe failure over implicit guessing: no locked orientation means no new entries.
+- Treat short-lived mismatches as noise; require repeated conflict polls before freezing entries.
+
+flowchart TD
+  discovery[discover.py] --> anchor[orientation_anchor_in_match_details]
+  anchor --> poller[poller_locked_home_away_assignment]
+  poller --> snapshot[FocusSnapshot_orientation_flags]
+  snapshot --> trader[TradeManager_entry_guard]
+  trader --> allowed[entry_allowed_when_locked]
+  trader --> blocked[ENTRY_SKIP_orientation_unlocked_or_conflict]
+
+### Why
+OddsPapi frequently returns `home/away` prices without outcome player identity, which makes runtime orientation guessing unstable and can invert sides. The orientation anchor removes per-poll side guessing from the trading path.
+
+### Impact
+- New mappings carry explicit orientation lock metadata.
+- Live entries are blocked when orientation is unsafe, reducing wrong-side trade risk.
+- No DB migration required (JSON metadata only).
+
+### How to verify
+- `conda run -n poly pytest -q tests/test_orientation_safety.py`
+- `conda run -n poly pytest -q tests/test_discover.py`
+- `conda run -n poly pytest -q tests/test_trader_guards.py`
+- `conda run -n poly python -m cli discover --days 1`
+- `conda run -n poly python -m cli live`
+  - Expect orientation status in the header (`LOCKED`/`UNLOCKED`) and `ENTRY_SKIP` reasons for unsafe orientation.
+
+## 2026-02-13 — Phantom entry retry (fast resubmit for delayed entries)
+
+### What changed
+- Added `_phantom_retry_entry` method to `TradeManager` — mirrors the phantom-ID retry logic used for exits, but applied to entry orders that go "delayed" and are not found on the book.
+- Wired into `_reconcile_entry_attempt`: when `get_order()` returns not-found and the order is older than `entry_phantom_retry_seconds` (default 3s), the system cancels the ghost order and immediately resubmits a new FAK order at the same limit price.
+- New config: `entry_phantom_retry_seconds` (default 3.0) and `entry_phantom_max_retries` (default 2).
+- Added 4 new tests covering gating logic and the success path.
+
+### Why
+Entry orders frequently receive a "delayed" status from Polymarket CLOB and then never materialize on the order book. The existing retry mechanism only fired from signal evaluation (next tick), which could be too slow. Exit reconciliation already had fast phantom retry — entries needed the same treatment. Analysis showed that since ~18:49 UTC on 2026-02-13, every entry attempt was failing via `delayed → order_not_found_timeout` (60s), while exits were being handled quickly by their phantom retry logic.
+
+### Impact
+- Entry orders that go "delayed" and are not found will now be retried within 3 seconds (configurable) rather than waiting the full 60s timeout.
+- Up to 2 phantom retries per entry (configurable via `entry_phantom_max_retries`).
+- No schema/migration changes — config only.
+- Existing signal-evaluation retry path (`_retry_delayed_live_entry`) continues to work as before; the phantom retry in reconciliation is additive.
+
+### How to verify
+```bash
+python -m pytest tests/test_order_attempts.py -v
+# Expect 20 passed including 4 new phantom_retry_entry tests
+```
+In live trading, watch for `ENTRY_RETRY` events with `reason=phantom_entry_retry` in the trade buffer. Failed phantom orders should now be retried within ~3s instead of timing out at 60s.
+
   Major Problem: 
 
 The legacy monitor_core.py (removed) was a ~3000-line god-class doing everything in one loop: candidate loading, focus selection, match lifecycle tracking, odds polling, WS management, Gamma refresh, snapshot building, trade signal processing, order execution, position management, and UI state assembly. Every feature added more state, locks, and edge cases to one monolithic loop.
@@ -28,6 +172,408 @@ Match lifecycle is inferred, not declared. You're trying to guess if a match is 
 The "candidate" abstraction is too broad. You load every mapped match within a time window, then try to figure out which ones matter. This creates the "which one is the focus?" problem that spawned all the buggy selection logic.
 The UI is coupled to the polling logic. The snapshot loop builds UI state AND processes trade signals in the same iteration, so a UI display bug (wrong bucket) can interact with trading logic, and vice versa.
 Rich Live + stdin is fragile. Rich's Live context redraws the entire screen every tick. Reading from stdin while that's happening is fundamentally awkward in a terminal.
+
+## 2026-02-13 — Live reconciliation guard: delay first probe + require repeated zero balances
+
+### What changed
+- Added `balance_first_poll_delay_seconds` (default `3.0`) in `services/shared/config.py` to delay the first balance-reconciliation poll in live mode.
+- Added `balance_reconcile_zero_polls_required` (default `3`) in `services/shared/config.py` to gate `balance_reconciled` behind repeated zero-balance confirmations.
+- Updated `TradeManager.start()` and `_reconcile_open_trade_balances()` in `services/cli/trader.py`:
+  - first balance poll is now seeded for ~3s after startup
+  - auto-close via `balance_reconciled` now requires consecutive zero-balance polls (default: initial + 2 follow-ups on 30s cadence)
+- Added unit coverage in `tests/test_order_attempts.py` for new timing and zero-poll helper behavior.
+- Updated lead-lag docs (`docs/project-plan.md`, `docs/architecture.md`) to reflect the new reconciliation timing/confirmation policy.
+
+### Why
+A single transient `balance=0` read immediately after entry could prematurely close a still-held live position. The guard makes reconciliation more robust while keeping the first feedback fast.
+
+### Impact
+- Reduces false-positive `balance_reconciled` exits caused by transient balance lag.
+- First reconciliation check still happens quickly (3s), but closure now needs repeated evidence.
+- No DB migration required.
+
+### How to verify
+- `conda run -n poly python -m pytest tests/test_order_attempts.py -q`
+  - Expected: tests pass, including new helper tests.
+- Live smoke check:
+  - Start live mode and open a position.
+  - Confirm first balance probe behavior occurs after ~3s and that a single zero-balance probe logs pending reconciliation rather than immediate close.
+  - Confirm close happens only after configured consecutive zero probes.
+
+### Flow changes
+```mermaid
+flowchart TD
+  start[entry_confirmed] --> first[balance_probe_after_3s]
+  first -->|balance>eps| keep[keep_position_open]
+  first -->|balance<=eps| z1[zero_poll_1]
+  z1 --> z2[zero_poll_2_at_30s]
+  z2 --> z3[zero_poll_3_at_60s]
+  z3 --> close[set_exit_reason_balance_reconciled]
+```
+
+## 2026-02-13 — Exit timeout refactor + conservative entry guards
+
+### What changed
+- Refactored duplicated exit timeout/balance fallback logic in `services/cli/trader.py` into a shared timeout handler used by both missing-order-id branches.
+- Finalized phantom-order-id recovery attempts and explicitly reopened trade state so retries are fresh (no perpetually active attempt loop).
+- Aligned stale position sweeping with PM-driven market-end checks by allowing either fixture terminal status or PM end-state/price-certainty to qualify.
+- Added conservative live entry guard config in `services/shared/config.py`: `max_spread`, `pm_endgame_threshold_high`, `pm_endgame_threshold_low`, `pm_book_stale_seconds`.
+- Added tests for timeout outcome classification, phantom finalize/reopen behavior, and new spread/staleness/endgame guard helpers.
+
+### Design decisions
+- Keep event semantics unchanged (`EXIT`, `EXIT_RETRY`, `EXIT_ERROR`) while reducing branch duplication for maintainability.
+- Endgame thresholds block only new entries; exit evaluation still runs to reduce stranded risk.
+- New safeguards default ON with conservative values to reduce low-liquidity failure modes without changing schema.
+
+### Why
+Exit management had accumulated overlapping patches and duplicate branches, increasing hang risk in thin/late books. This slice reduces reconciliation complexity and hardens entry quality under spread/staleness/endgame stress.
+
+### Impact
+- Lower chance of exit attempts remaining non-finalized after phantom order-id failures.
+- Reduced entry attempts in wide, stale, or near-certain endgame books.
+- No DB migration required.
+
+### How to verify
+- `conda run -n poly pytest -q tests/test_order_attempts.py tests/test_trader_guards.py`
+- `conda run -n poly pytest -q tests/test_orientation_safety.py`
+- Live smoke (`python -m cli live --mode live`):
+  - phantom failures emit `EXIT_ERROR` + `EXIT_RETRY` and reopen cleanly,
+  - wide spread / stale book / endgame thresholds skip entries,
+  - exits continue to evaluate during endgame.
+
+### Flow changes
+```mermaid
+flowchart TD
+  trigger[TriggerActive] --> endOrEndgame{EndedOrEndgame}
+  endOrEndgame -->|yes| exitsOnly[RunExitChecksOnly]
+  endOrEndgame -->|no| quality[SpreadAndStalenessGates]
+  quality -->|fail| skipEntry[SkipEntry]
+  quality -->|pass| evalEntry[EvaluateEntry]
+  evalEntry --> submitEntry[SubmitEntry]
+
+  reconcile[ReconcileExitAttempt] --> timeoutHelper[SharedTimeoutBalanceHandler]
+  reconcile --> phantomFinalize[FinalizePhantomAndReopen]
+```
+
+## 2026-02-12 — Add standalone Goalserve gold-edge pipeline
+
+### What changed
+- Added `services/shared/goalserve_client.py` to fetch/decode Goalserve esports feeds (`home` + `date`) and normalize LoL per-game stats.
+- Added DB tables for standalone strategy telemetry/lifecycle:
+  - `game_snapshots` (live Goalserve + PM book snapshots)
+  - `game_results` (final game outcomes/stats)
+  - `gold_edge_trades` (paper/live hold-to-resolution entries)
+- Added migration `migrations/versions/0012_gold_edge_tables.py`.
+- Added new CLI commands in `services/cli/main.py`:
+  - `gold-probe`
+  - `gold-collect-live`
+  - `gold-cache-daily`
+  - `gold-analyze`
+- Added initial config knobs in `services/shared/config.py` for Goalserve polling and simple threshold rules.
+- Added tests in `tests/test_goalserve_gold_edge.py`.
+
+### Why
+Lead-lag trading covers series moneyline re-pricing, but it does not provide map-level directional exposure. The standalone gold-edge flow captures live game-state signals (gold/objectives) and supports hold-to-resolution entries in per-game markets.
+
+### Impact
+- Requires DB migration: `alembic upgrade head`.
+- Adds a new standalone data/strategy path without changing lead-lag runtime flow.
+- Enables paper/live experiments for simple rule-based game winner entries.
+
+### How to verify
+- `python -m cli gold-probe --minutes 5`
+  - Expected: periodic LoL match/live counts and per-match gold movement status.
+- `python -m cli gold-collect-live --minutes 10 --trade-mode none`
+  - Expected: snapshot processing logs; rows added to `game_snapshots`.
+- `python -m cli gold-cache-daily --days-back 0`
+  - Expected: upsert count for `game_results`.
+- `python -m cli gold-analyze --days 14 --min-samples 20`
+  - Expected: bucketed minute/gold win-rate summary and rule candidates.
+
+## 2026-02-12 — Fix: exit_size_zero spam (BLOCKED events every tick)
+
+### What changed
+- `_submit_live_exit` now returns `bool | None`: `None` when exit is exhausted (size too small to sell).
+- On `exit_size_zero` and `exit_degraded_chunk_zero`, the trade is removed from `_open_trades` instead of retrying every tick.
+- Eliminates DB spam of identical BLOCKED events and trade buffer noise.
+
+### Why
+When `sell_shares <= 0` (quantity quantizes to zero), the trade could never be exited. The loop kept retrying and logging BLOCKED every ~0.5s for the same position.
+
+### Impact
+- Positions with sub-tick quantity are dropped from the live monitor after one BLOCKED event instead of spamming.
+- No schema or migration changes.
+
+### How to verify
+- Unit test: mock `_submit_live_exit` returning `None`; assert trade is removed from `_open_trades`.
+- Live: run a match with a tiny position (e.g. 0.015 shares); observe one BLOCKED line instead of repeated spam.
+
+---
+
+## 2026-02-12 — Changelog split: dedicated coherence changelog
+
+### What changed
+- Created `docs/coherence/changelog.md` — dedicated changelog for the coherence service.
+- Updated `.cursor/rules/core-guidance.mdc` — coherence doc changes route to `docs/coherence/changelog.md`; explicit routing for lead-lag vs coherence plan/architecture/changelog.
+
+### Why
+Coherence is a designated service with its own docs; keeping its changelog separate avoids polluting the root changelog and scopes history per service.
+
+### Impact
+- Changes to `docs/coherence/project-plan.md` or `docs/coherence/architecture.md` require entries in `docs/coherence/changelog.md`.
+- Root changelog continues for lead-lag and cross-cutting changes.
+
+---
+
+## 2026-02-12 — NEW SERVICE: Polymarket Coherence Arbitrage Scanner
+
+### What changed
+- Created `docs/coherence/project-plan.md` — project plan for a new coherence arbitrage scanning service.
+- Created `docs/coherence/architecture.md` — architecture and data flow for the coherence scanner.
+- The coherence service is a separate strategy from the lead-lag bot, sharing the same repo and `services/shared/` infrastructure.
+
+### Design decisions
+- **Same repo, new service directory** (`services/coherence/`): reuses existing Polymarket clients, config, and (later) CLOB executor without code duplication.
+- **Three mathematical strategies**: date cascade monotonicity, logical implication bounds, Fréchet joint probability bounds.
+- **Hold-to-resolution model**: paired positions lock in guaranteed or positive-EV profit at entry; no exit strategy needed.
+- **No external data sources**: all data from Polymarket Gamma API (free). No OddsPapi, no news, no sentiment.
+- **In-memory first**: no database until execution phase; JSON cache for persistence.
+- Existing lead-lag docs (`docs/project-plan.md`, `docs/architecture.md`) remain unchanged and in place.
+
+### Why
+Exploring a complementary strategy to lead-lag sports arb that is purely quantitative, requires no external paid APIs, and eliminates the exit problem by holding positions to resolution. Inspired by analysis of top PM traders who exploit structural mispricings across related markets.
+
+### Impact
+- New docs directory: `docs/coherence/`.
+- No changes to existing lead-lag code, schema, or runtime behavior.
+- Future code will live in `services/coherence/`.
+
+---
+
+## 2026-02-12 — Coherence M0+M1 implementation (scanner + detector CLI)
+
+### What changed
+- Added new standalone package `services/coherence/` with:
+  - `scanner.py` (M0 market catalog fetch + candidate filtering + cache write)
+  - `detector.py` (M1 date-stem detection + date parsing + cascade sorting)
+  - `models.py`, `cli.py`, and module entrypoint `__main__.py`
+- Added coherence settings in `services/shared/config.py`:
+  - `coherence_scan_interval_seconds`
+  - `coherence_cache_path`
+  - `coherence_min_volume`
+  - `coherence_min_liquidity`
+  - `coherence_description_threshold`
+- Added tests in `services/coherence/test_scanner.py` and `services/coherence/test_detector.py`.
+
+### Why
+Implement M0 and M1 as one vertical slice so a single command can fetch active events, build date-cascade candidates, and validate detection logic before adding monotonicity checks and execution features.
+
+### Impact
+- New CLI path is available from the `services/` directory: `python -m coherence scan`.
+- Scanner now writes an offline JSON cache at `services/coherence/coherence_cache.json` by default.
+- Coherence date cascades can be detected and reviewed with diagnostics for stem mismatch and date parse failures.
+- No database migrations or runtime changes to existing lead-lag CLI.
+
+### How to verify
+- `conda run -n poly python -m pytest services/coherence -q` → all coherence unit tests pass.
+- `conda run -n poly python -m ruff check services/coherence services/shared/config.py` → no lint errors.
+- `cd services && conda run -n poly python -m coherence scan --show-samples 2` → prints event counts, candidate counts, cascade counts, diagnostics, and sample cascades.
+
+### Flow changes
+```mermaid
+flowchart TD
+  scanCmd[coherence_scan_command] --> scanner[scanner_py_fetch_and_filter]
+  scanner --> cacheWrite[coherence_cache_json_write]
+  scanner --> detector[detector_py_build_cascades]
+  detector --> cliOutput[scan_summary_and_samples]
+```
+
+---
+
+## 2026-02-12 — Coherence M1 enhancement: semantic fallback for stem mismatches
+
+### What changed
+- Updated `services/coherence/detector.py` to keep strict stem matching as the primary gate and add a semantic-similarity fallback path for stem mismatches.
+- Added lazy-loaded sentence-transformer integration (`all-MiniLM-L6-v2` by default) with runtime-safe failure handling.
+- Added new coherence settings in `services/shared/config.py`:
+  - `coherence_semantic_fallback_enabled`
+  - `coherence_semantic_similarity_threshold`
+  - `coherence_semantic_model_name`
+- Expanded detector diagnostics with:
+  - `semantic_fallback_used`
+  - `semantic_model_unavailable`
+- Added detector coverage in `services/coherence/test_detector.py` for semantic fallback behavior.
+
+### Why
+Strict stem equality is precise but drops many valid date cascades with small wording differences. Semantic fallback recovers those candidates while preserving strict-first safety.
+
+### Impact
+- M1 can now admit some previously rejected stem mismatches when semantic similarity clears threshold.
+- If the embedding model is unavailable, M1 remains operational and falls back to strict stem-only behavior.
+- No schema or migration changes.
+
+### How to verify
+- `conda run -n poly python -m pytest services/coherence -q` -> coherence tests pass, including semantic fallback test.
+- `cd services && conda run -n poly python -m coherence scan --show-samples 2` -> scan completes and prints new diagnostic keys.
+
+### Flow changes
+```mermaid
+flowchart TD
+  candidate[CandidateEvent] --> stemCheck[Strict_stem_check]
+  stemCheck -->|pass| cascadeBuild[Build_DateCascade]
+  stemCheck -->|fail| semanticCheck[Semantic_similarity_fallback]
+  semanticCheck -->|score>=threshold| cascadeBuild
+  semanticCheck -->|score<threshold_or_model_missing| reject[Count_stem_mismatch]
+```
+
+---
+
+## 2026-02-12 — Coherence M2+M3 implementation (violations + orderbook checks)
+
+### What changed
+- Added `services/coherence/checks.py` with M2 monotonicity logic:
+  - checks all date-ordered pairs in each cascade
+  - flags `yes_short > yes_long` violations
+  - computes `pair_cost` and `edge_cents`
+- Added `services/coherence/ranker.py` with M3 orderbook-aware ranking:
+  - fetches relevant token books in batch
+  - estimates average fill price from ask ladders for `Yes(long)` and `No(short)` legs at target sizes
+  - computes post-slippage edge and marks fillability
+- Extended `services/coherence/models.py`:
+  - added token-side fields on `MarketInfo` (`yes_token_id`, `no_token_id`)
+  - added `Violation` and `RankedOpportunity` dataclasses
+- Updated `services/coherence/scanner.py` to map token IDs to Yes/No sides using outcome order.
+- Updated `services/coherence/cli.py`:
+  - M2 summary output after cascade detection
+  - M3 summary output with size and post-slippage edge
+  - new options: `--min-edge-cents`, `--m3-sizes`, `--skip-m3`
+- Added tests in `services/coherence/test_checks_ranker.py`.
+
+### Why
+M1 detection alone identifies candidate series, but actionable trading requires (1) explicit monotonicity violations and (2) realistic execution checks using live orderbook depth.
+
+### Impact
+- `coherence scan` now surfaces M2 violations and M3 opportunities in one run.
+- Opportunity lists can be filtered by minimum edge and evaluated at configurable target position sizes.
+- No DB schema changes; all outputs remain in-memory/CLI + existing cache.
+
+### How to verify
+- `conda run -n poly python -m pytest services/coherence -q` -> includes new M2/M3 tests and passes.
+- `cd services && conda run -n poly env COHERENCE_SEMANTIC_FALLBACK_ENABLED=false python -m coherence scan --show-samples 2 --min-edge-cents 2 --m3-sizes 100` -> prints M2 violation rows and M3 opportunity summary.
+
+### Flow changes
+```mermaid
+flowchart TD
+  scanCmd[coherence_scan] --> detectorM1[m1_detect_cascades]
+  detectorM1 --> checksM2[m2_find_violations]
+  checksM2 --> rankerM3[m3_orderbook_slippage_rank]
+  rankerM3 --> cliPrint[cli_print_top_violations_and_opportunities]
+```
+
+---
+
+## 2026-02-12 — BUG FIX: Deterministic Team-Side Mapping From Discovery
+
+### What changed
+- Updated `services/cli/discover.py` to persist deterministic side mapping metadata in `mappings.match_details`:
+  - `teams_swapped`
+  - `op_team_a` / `op_team_b`
+  - `pm_team_a` / `pm_team_b`
+  - `market_side_map` keyed by market (`match_winner`, `game_winner:N`) with `token_id_a` / `token_id_b`
+  - compatibility fields `pm_token_id_a` / `pm_token_id_b` for `match_winner`
+- Updated `services/cli/poller.py` so `_build_snapshot_for` uses persisted mapping first, deriving side assignment from stored `teams_swapped` + current market outcomes/tokens, and only falls back to fuzzy + price-swap heuristics if mapping is unavailable.
+- Added participant-name fallback in `_extract_p_refs_from_odds` for cases where participant IDs are missing, reducing false home/away orientation.
+
+### Design decisions
+- Keep schema unchanged by extending `Mapping.match_details` JSONB instead of adding DB columns.
+- Make discovery the source of truth for side orientation, since mapping quality is already evaluated there.
+- Keep backward compatibility: existing mappings without new keys still use legacy runtime heuristics.
+- Prefer current Gamma outcomes/token ordering plus stored `teams_swapped` over hardcoded token IDs to tolerate token refreshes.
+
+### Why
+Repeated live mis-pricings showed that runtime fuzzy matching (especially with abbreviations like `FF1`/`JL`) can drift and invert sides. Side orientation should be resolved once during mapping, not guessed repeatedly in the hot path.
+
+### Impact
+- Entry/exit signal evaluation is now anchored to deterministic mapping metadata for newly created mappings.
+- Reduced risk of pairing `p_ref_a/p_ref_b` with the wrong PM token book.
+- No schema migration required.
+
+### How to verify
+- `conda run -n poly env PYTHONPATH=./services python -m cli discover --days 7 --dry-run` -> discovery flow completes.
+- `conda run -n poly env PYTHONPATH=./services python -m pytest tests/ -q` -> test suite passes (existing unrelated failures, if any, should be unchanged).
+- Run `python -m cli live` after creating fresh mappings and confirm side assignment remains stable for abbreviated PM outcome names.
+
+```mermaid
+flowchart TD
+  discover[discover_mapping] --> mappingDetails[match_details_with_teams_swapped]
+  mappingDetails --> poller[poller_build_snapshot_for]
+  gamma[gamma_market_payload] --> poller
+  oddsPapi[oddspapi_odds_payload] --> pRefMap[extract_p_refs_from_odds]
+  pRefMap --> poller
+  poller --> snapshot[focus_snapshot_token_id_a_b]
+  snapshot --> trader[build_entry_candidates]
+```
+
+## 2026-02-12 — BUG FIX: Token-to-Side Mapping Mismatch Between Poller and Trader
+
+### Summary
+The poller and trader used **different algorithms** to map Polymarket outcome tokens to sides A/B, causing the trader to pair `p_ref_a` with the wrong token — producing phantom edges, wrong entries, and broken exit signals.
+
+### Bug details
+Two independent code paths resolved which PM token corresponds to side A vs side B:
+
+1. **Poller** (`_build_snapshot_for`): Used name-matching + **price-based swap detection** (compares `|p_ref - PM_price|` error for current vs swapped assignment). This is the smarter heuristic and produces correct snapshot data for the TUI display.
+
+2. **Trader** (`_build_entry_candidates` → `_resolve_books`): Used `_is_team_a`/`_is_team_b` **substring matching** + `_similarity` (SequenceMatcher) fallback. This is weaker and frequently disagrees with the poller when PM outcome names are abbreviations (e.g., "FF1" for "French Flair", "JL" for "Joblife").
+
+When the two paths disagreed, `_build_entry_candidates` paired `snapshot.p_ref_a` (from the poller's mapping) with a token from `_resolve_books`' different mapping. This caused:
+
+- **False positive edges**: e.g., p_ref_b=0.575 paired with the wrong token's ask=0.48 → phantom +9.5% edge, when the true edge on that token was -5.5%.
+- **Wrong exit signals**: Exit monitoring reads `p_ref/bid` from the snapshot (poller mapping), but the trade holds a token from the trader's mapping → convergence/stop-loss checks monitored the wrong book entirely.
+- **Systematic losses**: Trades entered on phantom edges were underwater from the start, and exited at wrong times.
+
+### What changed
+- Added `token_id_a` and `token_id_b` fields to `FocusSnapshot` in `monitor_types.py`.
+- Poller's `_build_snapshot_for` now records which token was assigned to each side during its swap-aware mapping.
+- `_build_entry_candidates` now uses the snapshot's authoritative token IDs to look up books from WS state, instead of independently re-deriving the mapping via `_resolve_books`.
+- This ensures entry edge computation, exit signal monitoring, and TUI display all use the **same** token-to-side mapping.
+
+### Files changed
+- `services/cli/monitor_types.py` — `FocusSnapshot` gains `token_id_a`, `token_id_b`.
+- `services/cli/poller.py` — `_build_snapshot_for` sets token IDs during side assignment.
+- `services/cli/trader.py` — `_build_entry_candidates` simplified to use snapshot token IDs; `_build_stub_snapshot` updated for new fields.
+
+### Why
+Multiple recent live trades showed poor entries and exits. Root cause traced to the poller (display) and trader (execution) disagreeing on which PM token is side A vs B — a mapping divergence that went undetected because the TUI showed internally-consistent (but differently-mapped) data.
+
+### Impact
+- Entry edge computation now uses the same token assignment as the TUI display and exit monitoring.
+- Eliminates phantom edges caused by p_ref/book cross-wiring.
+- Eliminates wrong exit signals caused by monitoring the wrong token's bid.
+- `_resolve_books` remains in `trader.py` but is no longer called from the entry pipeline.
+- No schema changes or migrations required.
+
+### How to verify
+- `conda run -n poly python -m pytest tests/ -q` → all existing tests pass.
+- Run `python -m cli live` on a match where PM outcome abbreviations differ from OddsPapi team names (e.g., "FF1" vs "French Flair"). Confirm the TUI edge display and actual entry decisions agree — no more phantom positive edges on mismatched sides.
+
+```mermaid
+flowchart TD
+    poller[Poller _build_snapshot_for] -->|"swap-aware mapping"| snapshot[FocusSnapshot<br/>p_ref_a + token_id_a<br/>p_ref_b + token_id_b]
+    snapshot -->|"TUI display"| tui[Edge Display]
+    snapshot -->|"entry candidates"| trader[_build_entry_candidates<br/>uses snapshot.token_id_a/b]
+    snapshot -->|"exit monitoring"| exits[_check_for_exits<br/>reads snapshot.p_ref/bid]
+    trader -->|"same token"| order[Order Execution]
+    
+    style poller fill:#2d5016,color:#fff
+    style snapshot fill:#1a3a5c,color:#fff
+    
+    subgraph BEFORE_bug [Before: divergent paths]
+        pollerOld[Poller swap detection] -.->|"different mapping"| snapshotOld[snapshot bid/ask]
+        resolveBooks[_resolve_books<br/>name matching] -.->|"different mapping"| traderOld[trader book lookup]
+    end
+    style BEFORE_bug fill:#5c1a1a,color:#fff
+```
 
 ## 2026-02-11 — CS2 discovery + live selection support
 
@@ -159,9 +705,9 @@ Operators want to see current and recent positions for the live match alongside 
 - `conda run -n poly python -m pytest tests/ -q --ignore=tests/test_live_display_classifier.py` → all pass.
 - Run `python -m cli live`, select a match that has positions in DB; confirm the Positions panel shows open/closed rows with entry, qty, exit, PnL%, and times.
 
-## 2026-02-08 — Exit Retry Guardrails + Phantom Order Recovery (Live)
-
 ## 2026-02-10 — Delayed Order Cancel+Retry (Entry + Exit)
+
+## 2026-02-08 — Exit Retry Guardrails + Phantom Order Recovery (Live)
 
 ### What changed
 - Added CLOB cancel support in `clob_executor.py` via `cancel_order(order_id)` with safe structured error handling.

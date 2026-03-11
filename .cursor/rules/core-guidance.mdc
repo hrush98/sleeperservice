@@ -10,8 +10,8 @@ alwaysApply: true
 You are working on a project that builds a **Prediction Market Intelligence Engine** (starting with Polymarket) with a path to deeper analytics and (later) optional automated execution.
 
 Before implementing any meaningful change:
-1) Read **@project-plan.md** (scope, milestones, constraints, quality bar).
-2) Read **@architecture.md** (components, data flow, interfaces).
+1) Read the relevant **project-plan** (scope, milestones, constraints): `docs/project-plan.md` for lead-lag, `docs/coherence/project-plan.md` for coherence.
+2) Read the relevant **architecture** (components, data flow): `docs/architecture.md` for lead-lag, `docs/coherence/architecture.md` for coherence.
 3) Propose a small plan (files touched + steps + verification commands).
 4) Implement.
 5) Verify locally (commands + expected output).
@@ -35,16 +35,15 @@ For anything related to the APIS:
   - `/docs/build-log/` — build notes (optional)
 
 ## Plan + architecture updates (required)
-If you make a change that alters any of the following, you MUST update **@project-plan.md** and/or **@architecture.md** accordingly:
-- component boundaries (api/worker/shared)
-- database schema (tables/columns/indexes/constraints)
-- ingestion cadence or data sources
-- scoring/evaluation methodology
-- deployment/runtime expectations
+If you make a change that alters any of the following, you MUST update the relevant plan/architecture and changelog:
+- **Lead-lag**: `docs/project-plan.md`, `docs/architecture.md` → `docs/changelog.md`
+- **Coherence service**: `docs/coherence/project-plan.md`, `docs/coherence/architecture.md` → `docs/coherence/changelog.md`
+- Scope includes: component boundaries (api/worker/shared), database schema, ingestion cadence, data sources, scoring/evaluation methodology, deployment/runtime expectations
 
 ## Changelog (required)
-Maintain `changelog.md`:
-- Append an entry for any modification to @project-plan.md or @architecture.md.
+Maintain changelogs per service:
+- **Lead-lag / root**: `docs/changelog.md` — for changes to `docs/project-plan.md`, `docs/architecture.md`, or cross-cutting work.
+- **Coherence service**: `docs/coherence/changelog.md` — for changes to `docs/coherence/project-plan.md` or `docs/coherence/architecture.md`.
 - Each entry includes:
   - Date (YYYY-MM-DD)
   - What changed (1–5 bullets)

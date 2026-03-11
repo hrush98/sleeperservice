@@ -4,6 +4,8 @@ Master project plan (v2 — simplified MVP)
 ## Vision
 Detect and exploit short-lived **lead–lag** inefficiencies between Pinnacle odds (via OddsPapi) and Polymarket CLOB sports markets (currently LoL + CS2). Start with paper trading; gate live execution on measured edge.
 
+In parallel, run a **standalone hold-to-resolution Gold-edge strategy** for LoL per-game markets using Goalserve live game-state data (gold/objectives) as the reference signal.
+
 ## Core insight
 Pinnacle reprices faster than Polymarket. When Pinnacle moves, there's a brief window where Polymarket is stale. We detect that window, measure it, and (later) trade it.
 
@@ -41,6 +43,10 @@ Run manually to collect upcoming matches for the next N days. Not always running
 - Each OddsPapi fixture ↔ a Polymarket **event fixture** (parent match)
 - Match by: league + team names + date (not exact time)
 - Match/game markets are children of the event via `parent_fixture_id`
+- Persist an orientation anchor in `mappings.match_details`:
+  - `orientation_locked`, `team_a_is_home`, `home_team`, `away_team`
+  - `orientation_anchor_source`, `orientation_anchor_confidence`, `orientation_anchor_ts`
+  - `orientation_anchor_reason` for explicit unsafe states
 
 **CLI interface:**
 ```
@@ -67,12 +73,30 @@ Runs when a mapped match goes live. The operator picks the match up front; the m
 - The live monitor polls, renders, and trades only that single match.
 - Use `r` to re-select without restarting the process.
 - Discovery remains separate; it only populates the DB for selection.
+- Live balance reconciliation uses a fast first probe (~3s) and only applies `balance_reconciled` after consecutive zero-balance confirmations on the 30s cadence.
+- Conservative default guards are enabled for live entry quality:
+  - `max_spread` blocks wide books,
+  - `pm_book_stale_seconds` blocks stale WS books,
+  - `pm_endgame_threshold_high/low` blocks new entries in endgame certainty zones (exits continue to run).
+- Orientation guard: entries require a locked, conflict-free orientation anchor. If unlocked/conflicting, the system records `ENTRY_SKIP` and does not trade.
 
 **Output:**
 - Console logs showing live comparison
 - Trade events + positions stored in DB
 - Simple `/ops/live` endpoint showing current state
 - Rotating "black box" log file at `./logs/live-<paper|live>.log` for postmortems
+
+### Mode 3: Gold-edge Monitor (standalone)
+Runs independently from lead-lag and targets **per-game LoL winner** markets.
+
+**Flow:**
+1. Poll Goalserve `esports/home?json=1` at fixed cadence
+2. Parse in-game stats (gold, kills, towers, dragons, barons, inhibitors)
+3. Join against mapped/closest Polymarket game-winner fixtures
+4. Log append-only live snapshots (Goalserve state + PM bid/ask)
+5. Apply simple rule thresholds (`minute`, `gold_diff`, `max_ask`, optional baron condition)
+6. In paper/live mode, buy YES and hold to resolution
+7. Resolve P&L when game winner is known
 
 ---
 
@@ -137,7 +161,7 @@ OddsPapi sportId for CS2: **17**
 - `polymarket_fixture_id` (fk → fixtures.id)
 - `confidence` (double precision)
 - `method` (text; "auto" | "manual")
-- `match_details` (jsonb; what matched: league, teams, date)
+- `match_details` (jsonb; mapping metadata, including orientation anchor and market-side map)
 - `created_at`, `updated_at`
 
 ### odds_snapshots (append-only)

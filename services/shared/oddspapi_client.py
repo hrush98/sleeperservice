@@ -382,6 +382,51 @@ class OddsPapiClient:
         return {}
 
     @staticmethod
+    def extract_pinnacle_totals(
+        odds_payload: dict,
+        line_value: float | None,
+        game_number: int | None = None,
+    ) -> dict[str, Any]:
+        """Extract Pinnacle over/under totals for a requested line.
+
+        Returns:
+        {
+            "line_value": float,
+            "over": {"price": float, "implied_prob": float, "changed_at": str},
+            "under": {"price": float, "implied_prob": float, "changed_at": str},
+        }
+        """
+        if line_value is None:
+            return {}
+        bookmaker_odds = odds_payload.get("bookmakerOdds") or {}
+        pinnacle = bookmaker_odds.get("pinnacle") or {}
+        markets = pinnacle.get("markets") or {}
+        target = float(line_value)
+
+        candidates: list[dict[str, Any]] = []
+        for market_id, market in markets.items():
+            if not isinstance(market, dict):
+                continue
+            parsed = OddsPapiClient._parse_totals_market(
+                market=market,
+                target_line=target,
+                game_number=game_number,
+                market_id=market_id,
+            )
+            if parsed:
+                candidates.append(parsed)
+
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            logger.warning(
+                "OddsPapi: multiple totals markets found for line=%s game=%s; refusing to guess.",
+                target,
+                game_number,
+            )
+        return {}
+
+    @staticmethod
     def _parse_home_away_market(market: dict) -> dict[str, Any]:
         """Parse a market only if it contains exact home/away selections."""
         outcomes = market.get("outcomes") or {}
@@ -420,6 +465,67 @@ class OddsPapiClient:
         if result.get("home") and result.get("away"):
             return result
         return {}
+
+    @staticmethod
+    def _parse_totals_market(
+        market: dict,
+        target_line: float,
+        game_number: int | None,
+        market_id: str | None = None,
+    ) -> dict[str, Any]:
+        outcomes = market.get("outcomes") or {}
+        result: dict[str, Any] = {}
+        matched_line: float | None = None
+        hinted_game = OddsPapiClient._market_game_number(market, market_id)
+        if game_number is not None and hinted_game is not None and hinted_game != game_number:
+            return {}
+
+        for outcome in outcomes.values():
+            if not isinstance(outcome, dict):
+                continue
+            players = outcome.get("players") or {}
+            player0 = players.get("0") or {}
+            if not isinstance(player0, dict):
+                continue
+            selection = str(player0.get("bookmakerOutcomeId") or "")
+            parsed = OddsPapiClient._parse_totals_outcome_id(selection)
+            if not parsed:
+                continue
+            line_value, side = parsed
+            if abs(line_value - target_line) > 1e-6:
+                continue
+            price = player0.get("price")
+            changed_at = player0.get("changedAt")
+            if price is None:
+                continue
+            try:
+                price_float = float(price)
+            except (TypeError, ValueError):
+                return {}
+            matched_line = line_value
+            implied_prob = 1.0 / price_float if price_float > 0 else None
+            result[side] = {
+                "price": price_float,
+                "implied_prob": implied_prob,
+                "changed_at": changed_at,
+                "player_id": player0.get("playerId"),
+            }
+
+        if result.get("over") and result.get("under"):
+            result["line_value"] = matched_line
+            return result
+        return {}
+
+    @staticmethod
+    def _parse_totals_outcome_id(bookmaker_outcome_id: str) -> tuple[float, str] | None:
+        raw = (bookmaker_outcome_id or "").strip().lower()
+        match = re.match(r"^(-?\d+(?:\.\d+)?)/(over|under)$", raw)
+        if not match:
+            return None
+        try:
+            return float(match.group(1)), match.group(2)
+        except ValueError:
+            return None
 
     @staticmethod
     def _parse_game_market(

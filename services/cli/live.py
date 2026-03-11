@@ -311,11 +311,13 @@ def _resolve_trade_mode(mode: str | None) -> str:
 
 
 def _prompt_match_selection(
-    limit: int = 8,
-    min_confidence: float = 0.5,
+    limit: int = 20,
+    min_confidence: float | None = None,
 ) -> tuple[Mapping, Fixture, list[Fixture], str] | None:
     if not sys.stdin.isatty():
         return None
+    if min_confidence is None:
+        min_confidence = settings.discovery_min_display_confidence
     now = datetime.now(tz=timezone.utc)
     with SessionLocal() as db:
         op_fixture = aliased(Fixture)
@@ -328,7 +330,7 @@ def _prompt_match_selection(
                 .join(pm_fixture, Mapping.polymarket_fixture_id == pm_fixture.id)
                 .where(op_fixture.start_time.is_not(None))
                 .where(op_fixture.start_time >= now - timedelta(hours=settings.discovery_lookback_hours))
-                .where(op_fixture.status != "finished")
+                .where(op_fixture.status != "cancelled")
                 .order_by(op_fixture.start_time.asc())
                 .limit(limit)
             )
@@ -405,8 +407,9 @@ def _prompt_match_selection(
             typer.echo("No match_winner market found for this mapping.")
             return None
         n_games = sum(1 for f in pm_fixtures if f.market_type == "game_winner")
+        n_totals = sum(1 for f in pm_fixtures if f.market_type == "totals")
         typer.echo(
-            f"  → match_winner + {n_games} game market(s) loaded"
+            f"  → match_winner + {n_games} game market(s) + {n_totals} totals market(s) loaded"
         )
         league_name = op_fix.league.name if op_fix.league else ""
         return mapping, op_fix, pm_fixtures, league_name
@@ -448,10 +451,10 @@ def _get_completed_positions_for_mapping(mapping_id: str, limit: int) -> list:
 
 
 def _resolve_all_markets(db, pm_fixture: Fixture) -> list[Fixture]:
-    """Return [match_winner, game1, game2, ...] for the mapping.
+    """Return [match_winner, game..., totals...] for the mapping.
 
-    Queries the event's children to find the match_winner and any
-    game_winner fixtures, ordered by game_number.
+    Queries the event's children to find the match_winner, game_winner,
+    and totals fixtures.
     """
     if pm_fixture.market_type == "match_winner":
         parent_id = pm_fixture.parent_fixture_id
@@ -482,11 +485,16 @@ def _resolve_all_markets(db, pm_fixture: Fixture) -> list[Fixture]:
         [c for c in children if c.market_type == "game_winner"],
         key=lambda g: g.game_number or 0,
     )
+    totals = sorted(
+        [c for c in children if c.market_type == "totals"],
+        key=lambda t: (t.game_number or 0, t.line_value or 0.0),
+    )
 
     result: list[Fixture] = []
     if match_winner:
         result.append(match_winner)
     result.extend(games)
+    result.extend(totals)
     return result
 
 

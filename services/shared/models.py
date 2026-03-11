@@ -1,7 +1,7 @@
 """
 LoL Lead-Lag Arbitrage Bot - Database Models (v2 simplified schema)
 
-8 tables:
+Core tables:
 - leagues: Tournament/league metadata from both sources
 - teams: Team/participant cache from both sources
 - fixtures: Upcoming/live matches from both sources
@@ -10,7 +10,14 @@ LoL Lead-Lag Arbitrage Bot - Database Models (v2 simplified schema)
 - shadow_orders: Paper trade decisions (append-only, legacy)
 - positions: Trade lifecycle (paper/real)
 - trade_events: Trade decision/execution event tape (append-only)
+
+Gold-edge tables:
+- game_snapshots: Live in-game + PM book snapshots (append-only)
+- game_results: Final game outcomes (upsert)
+- gold_edge_trades: Hold-to-resolution strategy trades (append + updates)
 """
+
+# pylint: disable=not-callable
 
 from __future__ import annotations
 
@@ -99,8 +106,9 @@ class Fixture(Base):
     start_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String, nullable=False, default="upcoming")  # upcoming|live|finished
     has_odds: Mapped[bool] = mapped_column(default=False)
-    market_type: Mapped[str | None] = mapped_column(String, nullable=True)  # match_winner|game_winner
+    market_type: Mapped[str | None] = mapped_column(String, nullable=True)  # match_winner|game_winner|totals
     game_number: Mapped[int | None] = mapped_column(nullable=True)  # 1/2/3 for game_winner
+    line_value: Mapped[float | None] = mapped_column(Float, nullable=True)  # totals line, e.g. 3.5
     series_type: Mapped[str | None] = mapped_column(String, nullable=True)  # bo1|bo3|bo5
     parent_fixture_id: Mapped[str | None] = mapped_column(
         UUID(as_uuid=True), ForeignKey("fixtures.id"), nullable=True
@@ -132,6 +140,7 @@ class Fixture(Base):
         Index("ix_fixtures_start_time", "start_time"),
         Index("ix_fixtures_league_id", "league_id"),
         Index("ix_fixtures_market_type", "market_type"),
+        Index("ix_fixtures_market_type_line_value", "market_type", "line_value"),
         Index("ix_fixtures_parent_fixture_id", "parent_fixture_id"),
     )
 
@@ -398,4 +407,141 @@ class TradeEvent(Base):
         Index("ix_trade_events_mapping_ts", "mapping_id", "ts"),
         Index("ix_trade_events_position_ts", "position_id", "ts"),
         Index("ix_trade_events_run_ts", "run_id", "ts"),
+    )
+
+
+class GameSnapshot(Base):
+    """Append-only live game snapshot rows for gold-edge strategy."""
+
+    __tablename__ = "game_snapshots"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+    source_match_id: Mapped[str] = mapped_column(String, nullable=False)  # Goalserve @id
+    source_league: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_date: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_time: Mapped[str | None] = mapped_column(String, nullable=True)
+    game_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    team_a_name: Mapped[str] = mapped_column(String, nullable=False)
+    team_b_name: Mapped[str] = mapped_column(String, nullable=False)
+    team_a_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    team_b_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    game_duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    gold_a: Mapped[float | None] = mapped_column(Float, nullable=True)
+    gold_b: Mapped[float | None] = mapped_column(Float, nullable=True)
+    gold_diff: Mapped[float | None] = mapped_column(Float, nullable=True)
+    kills_a: Mapped[float | None] = mapped_column(Float, nullable=True)
+    kills_b: Mapped[float | None] = mapped_column(Float, nullable=True)
+    towers_a: Mapped[float | None] = mapped_column(Float, nullable=True)
+    towers_b: Mapped[float | None] = mapped_column(Float, nullable=True)
+    dragons_a: Mapped[float | None] = mapped_column(Float, nullable=True)
+    dragons_b: Mapped[float | None] = mapped_column(Float, nullable=True)
+    barons_a: Mapped[float | None] = mapped_column(Float, nullable=True)
+    barons_b: Mapped[float | None] = mapped_column(Float, nullable=True)
+    inhibitors_a: Mapped[float | None] = mapped_column(Float, nullable=True)
+    inhibitors_b: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    pm_fixture_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("fixtures.id"), nullable=True
+    )
+    pm_token_id_a: Mapped[str | None] = mapped_column(String, nullable=True)
+    pm_token_id_b: Mapped[str | None] = mapped_column(String, nullable=True)
+    pm_bid_a: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pm_ask_a: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pm_bid_b: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pm_ask_b: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    raw_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+    pm_fixture: Mapped[Fixture | None] = relationship("Fixture", foreign_keys=[pm_fixture_id])
+
+    __table_args__ = (
+        Index("ix_game_snapshots_source_match_ts", "source_match_id", "ts"),
+        Index("ix_game_snapshots_game_no_ts", "game_no", "ts"),
+        Index("ix_game_snapshots_pm_fixture_ts", "pm_fixture_id", "ts"),
+    )
+
+
+class GameResult(Base):
+    """Final per-game outcomes for Goalserve LoL matches."""
+
+    __tablename__ = "game_results"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    source_match_id: Mapped[str] = mapped_column(String, nullable=False)
+    game_no: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_date: Mapped[str | None] = mapped_column(String, nullable=True)
+    source_league: Mapped[str | None] = mapped_column(String, nullable=True)
+
+    team_a_name: Mapped[str] = mapped_column(String, nullable=False)
+    team_b_name: Mapped[str] = mapped_column(String, nullable=False)
+    winner_side: Mapped[str | None] = mapped_column(String, nullable=True)  # "A" | "B"
+    final_duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    final_gold_a: Mapped[float | None] = mapped_column(Float, nullable=True)
+    final_gold_b: Mapped[float | None] = mapped_column(Float, nullable=True)
+    final_kills_a: Mapped[float | None] = mapped_column(Float, nullable=True)
+    final_kills_b: Mapped[float | None] = mapped_column(Float, nullable=True)
+    final_towers_a: Mapped[float | None] = mapped_column(Float, nullable=True)
+    final_towers_b: Mapped[float | None] = mapped_column(Float, nullable=True)
+    final_dragons_a: Mapped[float | None] = mapped_column(Float, nullable=True)
+    final_dragons_b: Mapped[float | None] = mapped_column(Float, nullable=True)
+    final_barons_a: Mapped[float | None] = mapped_column(Float, nullable=True)
+    final_barons_b: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    raw_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint("source_match_id", "game_no", name="uq_game_results_match_game"),
+        Index("ix_game_results_source_date", "source_date"),
+    )
+
+
+class GoldEdgeTrade(Base):
+    """Standalone hold-to-resolution trade lifecycle for gold-edge strategy."""
+
+    __tablename__ = "gold_edge_trades"
+
+    id: Mapped[str] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid4)
+    ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    mode: Mapped[str] = mapped_column(String, nullable=False)  # paper|live
+    status: Mapped[str] = mapped_column(String, nullable=False, default="open")  # open|resolved
+
+    source_match_id: Mapped[str] = mapped_column(String, nullable=False)
+    game_no: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    team_a_name: Mapped[str] = mapped_column(String, nullable=False)
+    team_b_name: Mapped[str] = mapped_column(String, nullable=False)
+    picked_side: Mapped[str] = mapped_column(String, nullable=False)  # "A" | "B"
+
+    pm_fixture_id: Mapped[str | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("fixtures.id"), nullable=True
+    )
+    token_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    entry_price: Mapped[float] = mapped_column(Float, nullable=False)
+    model_prob: Mapped[float] = mapped_column(Float, nullable=False)
+    edge_at_entry: Mapped[float] = mapped_column(Float, nullable=False)
+    stake_usd: Mapped[float] = mapped_column(Float, nullable=False)
+    shares: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    order_id: Mapped[str | None] = mapped_column(String, nullable=True)
+    order_status: Mapped[str | None] = mapped_column(String, nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    winner_side: Mapped[str | None] = mapped_column(String, nullable=True)
+    pnl_usd: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    raw_json: Mapped[dict] = mapped_column(JSONB, nullable=False)
+
+    pm_fixture: Mapped[Fixture | None] = relationship("Fixture", foreign_keys=[pm_fixture_id])
+
+    __table_args__ = (
+        Index("ix_gold_edge_trades_open", "status"),
+        Index("ix_gold_edge_trades_ts", "ts"),
+        Index("ix_gold_edge_trades_source_match", "source_match_id"),
     )

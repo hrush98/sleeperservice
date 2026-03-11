@@ -38,11 +38,20 @@ class FocusSnapshot:
     ask_b: float | None
     mid_a: float | None
     mid_b: float | None
+    token_id_a: str | None
+    token_id_b: str | None
     edge: NetEdgeResult
     updated_at: datetime
     ws_connected: bool
     last_odds_update: datetime | None
     last_gamma_update: datetime | None
+    line_value: float | None = None
+    side_a_label: str | None = None
+    side_b_label: str | None = None
+    p_ref_source: str = "direct"
+    orientation_locked: bool = False
+    orientation_source: str | None = None
+    orientation_conflict: bool = False
 
 
 @dataclass
@@ -207,11 +216,23 @@ class LastLogEvents:
         return text
 
 
-def format_market_label(market_type: str | None, game_number: int | None) -> str:
+def format_market_label(
+    market_type: str | None,
+    game_number: int | None,
+    line_value: float | None = None,
+    p_ref_source: str | None = None,
+) -> str:
     if market_type == "match_winner":
         return "MATCH (ML)"
     if market_type == "game_winner":
-        return f"GAME {game_number}" if game_number else "GAME"
+        base = f"GAME {game_number}" if game_number else "GAME"
+        if p_ref_source == "derived_series":
+            return f"{base} *"
+        return base
+    if market_type == "totals":
+        line = f"{line_value:.1f}" if line_value is not None else "?"
+        base = f"TOTAL {line}"
+        return f"{base} *" if p_ref_source == "derived_series" else base
     return market_type or "-"
 
 

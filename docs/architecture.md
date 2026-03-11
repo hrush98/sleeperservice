@@ -4,6 +4,8 @@ LoL + CS2 Lead–Lag Arbitrage Bot (v2 — simplified MVP)
 ## Overview
 Two-mode system for detecting lead–lag inefficiencies between Pinnacle (via OddsPapi) and Polymarket sports markets (currently LoL + CS2).
 
+An additional standalone mode supports **Goalserve-driven gold-edge trading** for LoL per-game markets (hold-to-resolution).
+
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                         USER (CLI)                              │
@@ -80,6 +82,10 @@ For each OddsPapi fixture, find a matching Polymarket **event** by:
 3. **Date match:** same calendar date (ignore exact time)
 
 Store mapping with confidence score for the event; markets join via parent_fixture_id.
+Additionally, discovery persists an orientation anchor in `mappings.match_details`:
+- `orientation_locked` + `team_a_is_home` (contract for assigning OddsPapi home/away to side A/B)
+- `orientation_anchor_source` / `orientation_anchor_confidence` / `orientation_anchor_reason`
+- `home_team` / `away_team` for operator visibility and audits
 
 ---
 
@@ -112,11 +118,15 @@ Store mapping with confidence score for the event; markets join via parent_fixtu
 
 6. Compare (per market):
    p_ref vs PM ask/bid (match moneyline or per-game line)
+   If direct game-winner odds are missing, derive game p_ref from match moneyline
+   using series math (bo3/bo5 inversion) and tag snapshot source as derived.
+   For totals lines, use direct Pinnacle totals (over/under) when line matches PM.
    → Build snapshot per market, compute edge independently
 
 7. Trade signals:
    Trigger fires from match_winner p_ref movement → propagates to all markets.
    Entry/exit evaluated independently per market.
+   New entries require `orientation_locked=true` and no active orientation conflict.
 
 8. (Optional, live mode)
    Place FAK market orders via CLOB client (buy by USDC amount, sell by shares)
@@ -125,14 +135,27 @@ Store mapping with confidence score for the event; markets join via parent_fixtu
 
 ### Exit reconciliation (live mode)
 - Normalize conditional token balances from raw on-chain units using configured token decimals.
+- Run the first balance probe after a short warmup (`balance_first_poll_delay_seconds`, default 3s), then continue on the regular cadence (`balance_poll_interval_seconds`, default 30s).
+- Require multiple consecutive zero-balance probes (`balance_reconcile_zero_polls_required`, default 3 total polls: initial + 2 follow-ups) before auto-closing with `balance_reconciled`.
 - If REST order status is unavailable, fall back to user WS recovery by asset+side after phantom order-id threshold.
 - On repeated timeouts with remaining balance, reopen the trade for retry with cooldown and max-attempt guardrails.
+- Repeated phantom order-id failures are finalized and reopened as fresh retries to avoid non-finalized reconciliation loops.
+- Stale-position sweep treats a market as resolved when either fixture status is terminal or PM resolution/price-certainty indicates end of market.
+
+### Entry safety gates (live mode)
+- Hard max spread gate (`max_spread`, default `0.08`) blocks entries when books are too wide.
+- Derived game p_ref gate uses stricter entry thresholds (`derived_game_*`) when
+  game p_ref is inferred from series moneyline.
+- Totals markets use strict totals thresholds (`totals_*`) for spread/depth/alpha gates.
+- WS book staleness gate (`pm_book_stale_seconds`, default `5s`) blocks entries on outdated book snapshots.
+- Endgame gate (`pm_endgame_threshold_high` / `pm_endgame_threshold_low`, default `0.97 / 0.03`) blocks new entries while still allowing exits.
 
 **Single-match trading (multi-market):**
 - Operator picks the match explicitly before the TUI starts.
 - The live monitor loads the match_winner AND all game_winner children for the selected mapping.
+- The live monitor also loads totals children (all matched lines) for the selected mapping.
 - OddsPapi polling is shared (one fixture); Gamma + WS cover all PM markets.
-- The TUI displays all markets (match_winner + game 1/2/3) in the focus panel.
+- The TUI displays all markets (match_winner + game markets + totals lines) in the focus panel.
 - Triggers fire from match_winner p_ref movement and propagate to all markets.
 - Each market is evaluated independently for entry/exit signals.
 - To switch matches, use the `r` command to re-select without restarting the process.
@@ -153,6 +176,29 @@ Store mapping with confidence score for the event; markets join via parent_fixtu
 ### Observability
 - The live TUI redirects stdout logging into an on-screen log buffer.
 - A rotating "black box" log file is also written to `./logs/live-<paper|live>.log` for postmortems (timeline, infra issues, unexpected exceptions).
+
+---
+
+## Mode 3: Gold-edge Monitor (CLI)
+
+**Purpose:** Capture live in-game LoL state from Goalserve, measure EV against Polymarket game-winner asks, and optionally execute hold-to-resolution entries.
+
+### Flow
+```
+Goalserve /esports/home?json=1 (poll)
+  -> parse game stats (gold/kills/towers/dragons/barons)
+  -> map to PM game_winner fixture + token IDs
+  -> fetch PM CLOB orderbook (bid/ask)
+  -> append snapshot row
+  -> evaluate simple rule thresholds
+  -> optional BUY YES (paper/live), hold to resolution
+  -> resolve P&L from final winner
+```
+
+### Storage
+- `game_snapshots` (append-only): Goalserve + PM book state at each poll
+- `game_results` (upsert): final per-game outcomes and final stats
+- `gold_edge_trades` (append + resolve update): paper/live entries held to resolution
 
 ---
 

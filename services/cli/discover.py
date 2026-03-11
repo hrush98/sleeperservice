@@ -6,8 +6,9 @@ then builds mappings between them.
 """
 
 import logging
+import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from uuid import uuid4
 
@@ -18,6 +19,7 @@ from zoneinfo import ZoneInfo
 
 from shared.config import settings
 from shared.db import SessionLocal
+from shared.goalserve_client import GoalserveClient
 from shared.models import Fixture, League, Mapping, Team
 from shared.oddspapi_client import OddsPapiClient
 from shared.polymarket_client import PolymarketClient
@@ -289,6 +291,7 @@ def discover_command(days: int, dry_run: bool = False, include_past: bool = Fals
                         "start_time": _parse_datetime(f.get("startTime")),
                         "status": OddsPapiClient.infer_fixture_status(f),
                         "has_odds": bool(f.get("hasOdds")),
+                        "line_value": None,
                         "raw_json": f,
                     }
                     oddspapi_fixtures.append(fixture_data)
@@ -303,6 +306,7 @@ def discover_command(days: int, dry_run: bool = False, include_past: bool = Fals
                                 "start_time": fixture_data["start_time"],
                                 "status": fixture_data["status"],
                                 "has_odds": fixture_data["has_odds"],
+                                "line_value": fixture_data["line_value"],
                                 "raw_json": fixture_data["raw_json"],
                             },
                         )
@@ -428,23 +432,29 @@ def discover_command(days: int, dry_run: bool = False, include_past: bool = Fals
 
                     match_market: dict | None = None
                     game_markets: list[tuple[dict, int | None]] = []
+                    totals_markets: list[tuple[dict, int | None, float | None]] = []
 
                     for m in markets:
                         market_class = _classify_polymarket_market(m)
                         if not market_class:
                             continue
-                        market_type, game_number = market_class
+                        market_type, game_number, line_value = market_class
                         if market_type == "match_winner":
                             match_market = m
                         elif market_type == "game_winner":
                             game_markets.append((m, game_number))
+                        elif market_type == "totals":
+                            totals_markets.append((m, game_number, line_value))
 
                     event_fixture_id = None
                     series_type = _extract_series_type(match_market) if match_market else None
                     event_start = _extract_event_start(event, markets, match_market)
+                    event_team_a: str | None = None
+                    event_team_b: str | None = None
 
                     if match_market:
                         team_a, team_b = _extract_polymarket_teams(match_market)
+                        event_team_a, event_team_b = team_a, team_b
                         if team_a and team_b:
                             event_source_id = str(
                                 event.get("id") or event.get("slug") or event.get("eventId") or ""
@@ -463,6 +473,7 @@ def discover_command(days: int, dry_run: bool = False, include_past: bool = Fals
                                     "has_odds": False,
                                     "market_type": "event",
                                     "game_number": None,
+                                    "line_value": None,
                                     "series_type": series_type,
                                     "parent_fixture_id": None,
                                     "raw_json": event,
@@ -483,6 +494,7 @@ def discover_command(days: int, dry_run: bool = False, include_past: bool = Fals
                                             "status": fixture_data["status"],
                                             "market_type": fixture_data["market_type"],
                                             "game_number": fixture_data["game_number"],
+                                            "line_value": fixture_data["line_value"],
                                             "series_type": fixture_data["series_type"],
                                             "parent_fixture_id": fixture_data["parent_fixture_id"],
                                             "raw_json": fixture_data["raw_json"],
@@ -526,6 +538,7 @@ def discover_command(days: int, dry_run: bool = False, include_past: bool = Fals
                                 "has_odds": True,
                                 "market_type": "match_winner",
                                 "game_number": None,
+                                "line_value": None,
                                 "series_type": series_type,
                                 "parent_fixture_id": event_fixture_id,
                                 "raw_json": match_market,
@@ -546,6 +559,7 @@ def discover_command(days: int, dry_run: bool = False, include_past: bool = Fals
                                         "status": fixture_data["status"],
                                         "market_type": fixture_data["market_type"],
                                         "game_number": fixture_data["game_number"],
+                                        "line_value": fixture_data["line_value"],
                                         "series_type": fixture_data["series_type"],
                                         "parent_fixture_id": fixture_data["parent_fixture_id"],
                                         "raw_json": fixture_data["raw_json"],
@@ -587,6 +601,7 @@ def discover_command(days: int, dry_run: bool = False, include_past: bool = Fals
                             "has_odds": True,
                             "market_type": "game_winner",
                             "game_number": game_number,
+                            "line_value": None,
                             "series_type": game_series_type,
                             "parent_fixture_id": event_fixture_id,
                             "raw_json": m,
@@ -607,6 +622,66 @@ def discover_command(days: int, dry_run: bool = False, include_past: bool = Fals
                                     "status": fixture_data["status"],
                                     "market_type": fixture_data["market_type"],
                                     "game_number": fixture_data["game_number"],
+                                    "line_value": fixture_data["line_value"],
+                                    "series_type": fixture_data["series_type"],
+                                    "parent_fixture_id": fixture_data["parent_fixture_id"],
+                                    "raw_json": fixture_data["raw_json"],
+                                },
+                            )
+                            db.execute(stmt)
+
+                    for m, game_number, line_value in totals_markets:
+                        team_a = event_team_a
+                        team_b = event_team_b
+                        if not team_a or not team_b:
+                            fallback_a, fallback_b = _extract_polymarket_teams(m)
+                            team_a = fallback_a or team_a
+                            team_b = fallback_b or team_b
+                        if not team_a or not team_b:
+                            continue
+                        fixture_data = {
+                            "source": "polymarket",
+                            "source_id": str(m.get("id") or m.get("conditionId") or event.get("id")),
+                            "league_id": pm_league_db.id if pm_league_db else None,
+                            "team_a_name": team_a,
+                            "team_b_name": team_b,
+                            "start_time": _parse_datetime(
+                                m.get("gameStartTime")
+                                or m.get("game_start_time")
+                                or m.get("startDateIso")
+                                or m.get("startDate")
+                                or event.get("startDateIso")
+                                or event.get("startDate")
+                            ),
+                            "status": "upcoming"
+                            if (m.get("active") or event.get("active"))
+                            and not (m.get("closed") or event.get("closed"))
+                            else "finished",
+                            "has_odds": True,
+                            "market_type": "totals",
+                            "game_number": game_number,
+                            "line_value": line_value,
+                            "series_type": _extract_series_type(m) or series_type,
+                            "parent_fixture_id": event_fixture_id,
+                            "raw_json": m,
+                        }
+                        polymarket_fixtures.append(fixture_data)
+                        sport_fixture_count += 1
+
+                        if not dry_run:
+                            stmt = insert(Fixture).values(
+                                id=uuid4(), **fixture_data
+                            ).on_conflict_do_update(
+                                index_elements=["source", "source_id"],
+                                set_={
+                                    "league_id": fixture_data["league_id"],
+                                    "team_a_name": fixture_data["team_a_name"],
+                                    "team_b_name": fixture_data["team_b_name"],
+                                    "start_time": fixture_data["start_time"],
+                                    "status": fixture_data["status"],
+                                    "market_type": fixture_data["market_type"],
+                                    "game_number": fixture_data["game_number"],
+                                    "line_value": fixture_data["line_value"],
                                     "series_type": fixture_data["series_type"],
                                     "parent_fixture_id": fixture_data["parent_fixture_id"],
                                     "raw_json": fixture_data["raw_json"],
@@ -650,6 +725,11 @@ def discover_command(days: int, dry_run: bool = False, include_past: bool = Fals
         mappings_created = 0
         mappings_high = 0
         created_mappings: list[dict] = []  # Track for overview
+        goalserve_orientations = _load_goalserve_orientations()
+        odds_payload_cache: dict[str, dict] = {}
+        orientation_oddspapi = OddsPapiClient(
+            global_cooldown_ms=settings.oddspapi_global_cooldown_ms_discovery
+        )
 
         for op_fix in oddspapi_db_fixtures:
             for pm_fix in polymarket_db_fixtures:
@@ -669,13 +749,29 @@ def discover_command(days: int, dry_run: bool = False, include_past: bool = Fals
                     ).scalar_one_or_none()
 
                     if not existing:
+                        details_enriched = dict(details)
+                        teams_swapped = bool(details_enriched.get("teams_swapped"))
+                        side_map = _build_market_side_map(pm_fix.raw_json or {}, teams_swapped=teams_swapped)
+                        if side_map:
+                            details_enriched["market_side_map"] = side_map
+                            mw = side_map.get("match_winner")
+                            if isinstance(mw, dict):
+                                details_enriched["pm_token_id_a"] = mw.get("token_id_a")
+                                details_enriched["pm_token_id_b"] = mw.get("token_id_b")
+                        orientation_anchor = _resolve_orientation_anchor(
+                            op_fix=op_fix,
+                            goalserve_orientations=goalserve_orientations,
+                            oddspapi=orientation_oddspapi,
+                            odds_payload_cache=odds_payload_cache,
+                        )
+                        _apply_orientation_anchor(details_enriched, orientation_anchor)
                         mapping = Mapping(
                             id=uuid4(),
                             oddspapi_fixture_id=op_fix.id,
                             polymarket_fixture_id=pm_fix.id,
                             confidence=confidence,
                             method="auto",
-                            match_details=details,
+                            match_details=details_enriched,
                         )
                         db.add(mapping)
                         mappings_created += 1
@@ -710,6 +806,7 @@ def discover_command(days: int, dry_run: bool = False, include_past: bool = Fals
 
         if not dry_run:
             db.commit()
+        orientation_oddspapi.close()
 
         stats["mappings_created"] = mappings_created
         stats["mappings_high_confidence"] = mappings_high
@@ -761,7 +858,13 @@ def discover_command(days: int, dry_run: bool = False, include_past: bool = Fals
 
 
 def _print_mapping_overview(window_start: datetime, include_past: bool) -> None:
-    """Print an overview of mapped matches from the database."""
+    """Print an overview of mapped matches from the database.
+
+    Only shows mappings at or above ``discovery_min_display_confidence``
+    and ranks them by Polymarket liquidity (descending).
+    """
+    min_conf = settings.discovery_min_display_confidence
+
     with SessionLocal() as db:
         # Get all mappings
         all_mappings = db.execute(select(Mapping)).scalars().all()
@@ -770,13 +873,15 @@ def _print_mapping_overview(window_start: datetime, include_past: bool) -> None:
             typer.echo("\n📭 No mappings found.")
             return
 
-        typer.echo("\n" + "=" * 60)
-        typer.echo(f"🎯 Mapped Matches Overview ({len(all_mappings)} total)")
-        typer.echo("=" * 60)
-
         # Build display data
         mapping_data = []
+        skipped_low = 0
         for m in all_mappings:
+            # ---------- confidence gate ----------
+            if m.confidence < min_conf:
+                skipped_low += 1
+                continue
+
             op_fix = db.execute(
                 select(Fixture).where(Fixture.id == m.oddspapi_fixture_id)
             ).scalar_one_or_none()
@@ -792,6 +897,9 @@ def _print_mapping_overview(window_start: datetime, include_past: bool) -> None:
                 market_label = pm_fix.market_type
                 if pm_fix.game_number:
                     market_label = f"{market_label} G{pm_fix.game_number}"
+
+                liquidity = _extract_market_liquidity(pm_fix.raw_json)
+
                 mapping_data.append({
                     "league": op_fix.raw_json.get("tournamentName", "Unknown"),
                     "match": f"{op_fix.team_a_name} vs {op_fix.team_b_name}",
@@ -801,12 +909,25 @@ def _print_mapping_overview(window_start: datetime, include_past: bool) -> None:
                     "confidence": m.confidence,
                     "is_high": m.confidence >= 0.8,
                     "market": market_label or "",
+                    "liquidity": liquidity,
                 })
 
-        # Sort by start time
+        typer.echo("\n" + "=" * 60)
+        conf_pct_label = int(min_conf * 100)
+        typer.echo(
+            f"🎯 Mapped Matches Overview "
+            f"({len(mapping_data)} shown, {skipped_low} below {conf_pct_label}% hidden)"
+        )
+        typer.echo("=" * 60)
+
+        # Primary sort: liquidity descending, then start time, then confidence
         sorted_mappings = sorted(
             mapping_data,
-            key=lambda x: (x["start_time"] or datetime.max, -x["confidence"]),
+            key=lambda x: (
+                -x["liquidity"],
+                x["start_time"] or datetime.max,
+                -x["confidence"],
+            ),
         )
 
         for m in sorted_mappings:
@@ -823,8 +944,19 @@ def _print_mapping_overview(window_start: datetime, include_past: bool) -> None:
             else:
                 conf_str = typer.style(f"[{conf_pct}%]", fg=typer.colors.RED)
 
+            # Liquidity display
+            liq = m["liquidity"]
+            if liq >= 1_000_000:
+                liq_str = f"${liq / 1_000_000:.1f}M"
+            elif liq >= 1_000:
+                liq_str = f"${liq / 1_000:.1f}K"
+            elif liq > 0:
+                liq_str = f"${liq:.0f}"
+            else:
+                liq_str = "$–"
+
             market_str = f" ({m['market']})" if m.get("market") else ""
-            typer.echo(f"\n  {conf_str} {m['league']}{market_str}")
+            typer.echo(f"\n  {conf_str} {m['league']}{market_str}  💰 {liq_str}")
             typer.echo(f"      📅 OddsPapi: {op_time_str}")
             typer.echo(f"      📅 Polymarket: {pm_time_str}")
             typer.echo(f"      🎮 {m['match']}")
@@ -920,6 +1052,11 @@ def _calculate_match_confidence(op_fix: Fixture, pm_fix: Fixture) -> tuple[float
         "date_match": False,
         "teams_match": False,
         "league_match": False,
+        "teams_swapped": False,
+        "op_team_a": op_fix.team_a_name,
+        "op_team_b": op_fix.team_b_name,
+        "pm_team_a": pm_fix.team_a_name,
+        "pm_team_b": pm_fix.team_b_name,
     }
 
     # Hard date gate (UTC date match required)
@@ -951,10 +1088,12 @@ def _calculate_match_confidence(op_fix: Fixture, pm_fix: Fixture) -> tuple[float
         if direct_score >= swapped_score:
             details["team_a_similarity"] = sim_aa
             details["team_b_similarity"] = sim_bb
+            details["teams_swapped"] = False
             team_score = direct_score
         else:
             details["team_a_similarity"] = sim_ab
             details["team_b_similarity"] = sim_ba
+            details["teams_swapped"] = True
             team_score = swapped_score
 
         # Teams match if average similarity > 0.6
@@ -975,7 +1114,120 @@ def _calculate_match_confidence(op_fix: Fixture, pm_fix: Fixture) -> tuple[float
     return confidence, details
 
 
-def _classify_polymarket_market(market: dict) -> tuple[str, int | None] | None:
+def _parse_outcomes(raw: dict) -> list[str]:
+    outcomes = raw.get("outcomes") or []
+    if isinstance(outcomes, str):
+        try:
+            import json
+
+            outcomes = json.loads(outcomes)
+        except (json.JSONDecodeError, TypeError):
+            outcomes = []
+    return [str(o) for o in outcomes if o]
+
+
+def _parse_token_ids(raw: dict) -> list[str]:
+    token_ids = raw.get("clobTokenIds") or []
+    if isinstance(token_ids, str):
+        try:
+            import json
+
+            token_ids = json.loads(token_ids)
+        except (json.JSONDecodeError, TypeError):
+            token_ids = []
+    return [str(t) for t in token_ids if t]
+
+
+def _extract_outcome_token_pairs(raw: dict) -> list[tuple[str, str]]:
+    tokens = raw.get("tokens") or []
+    if isinstance(tokens, str):
+        try:
+            import json
+
+            tokens = json.loads(tokens)
+        except (json.JSONDecodeError, TypeError):
+            tokens = []
+    pairs: list[tuple[str, str]] = []
+    if isinstance(tokens, list):
+        for token in tokens:
+            if not isinstance(token, dict):
+                continue
+            token_id = token.get("token_id") or token.get("tokenId") or token.get("id")
+            outcome = token.get("outcome") or token.get("name") or token.get("title")
+            if token_id and outcome:
+                pairs.append((str(outcome), str(token_id)))
+    if pairs:
+        return pairs
+    outcomes = _parse_outcomes(raw)
+    token_ids = _parse_token_ids(raw)
+    if not outcomes:
+        return []
+    return [
+        (str(outcomes[idx]), str(token_ids[idx]) if idx < len(token_ids) else "")
+        for idx in range(len(outcomes))
+    ]
+
+
+def _line_key(line_value: float | None) -> str:
+    if line_value is None:
+        return "na"
+    formatted = f"{float(line_value):.3f}".rstrip("0").rstrip(".")
+    return formatted or "0"
+
+
+def _market_key(market_type: str, game_number: int | None, line_value: float | None = None) -> str:
+    if market_type == "game_winner" and game_number:
+        return f"game_winner:{game_number}"
+    if market_type == "totals":
+        if game_number:
+            return f"totals:game{game_number}:{_line_key(line_value)}"
+        return f"totals:{_line_key(line_value)}"
+    return "match_winner"
+
+
+def _build_market_side_map(event_raw: dict, *, teams_swapped: bool) -> dict[str, dict]:
+    market_side_map: dict[str, dict] = {}
+    markets = event_raw.get("markets") or []
+    if not isinstance(markets, list):
+        return market_side_map
+    for market in markets:
+        if not isinstance(market, dict):
+            continue
+        classified = _classify_polymarket_market(market)
+        if not classified:
+            continue
+        market_type, game_number, line_value = classified
+        key = _market_key(market_type, game_number, line_value)
+        pairs = _extract_outcome_token_pairs(market)
+        if len(pairs) < 2:
+            continue
+        if market_type == "totals":
+            over_pair = next((pair for pair in pairs if _outcome_side(pair[0]) == "over"), None)
+            under_pair = next((pair for pair in pairs if _outcome_side(pair[0]) == "under"), None)
+            if not over_pair or not under_pair:
+                continue
+            token_id_a, token_id_b = over_pair[1], under_pair[1]
+            pm_team_for_a, pm_team_for_b = "OVER", "UNDER"
+        else:
+            left_name, left_token = pairs[0]
+            right_name, right_token = pairs[1]
+            if teams_swapped:
+                token_id_a, token_id_b = right_token, left_token
+                pm_team_for_a, pm_team_for_b = right_name, left_name
+            else:
+                token_id_a, token_id_b = left_token, right_token
+                pm_team_for_a, pm_team_for_b = left_name, right_name
+        market_side_map[key] = {
+            "token_id_a": token_id_a,
+            "token_id_b": token_id_b,
+            "pm_team_for_a": pm_team_for_a,
+            "pm_team_for_b": pm_team_for_b,
+            "line_value": line_value,
+        }
+    return market_side_map
+
+
+def _classify_polymarket_market(market: dict) -> tuple[str, int | None, float | None] | None:
     """
     Classify a Polymarket market as match winner or game winner.
 
@@ -986,13 +1238,64 @@ def _classify_polymarket_market(market: dict) -> tuple[str, int | None] | None:
     sports_type = (market.get("sportsMarketType") or "").lower()
 
     if sports_type == "moneyline" and "vs" in question:
-        return "match_winner", None
+        return "match_winner", None, None
 
     if sports_type == "child_moneyline":
         game_number = _extract_game_number(question) or _extract_game_number(group_title)
         if game_number:
-            return "game_winner", game_number
+            return "game_winner", game_number, None
 
+    if sports_type in {"totals", "child_totals"} or _looks_like_totals_market(market):
+        game_number = _extract_game_number(question) or _extract_game_number(group_title)
+        line_value = _extract_totals_line(market)
+        if line_value is not None:
+            return "totals", game_number, line_value
+
+    return None
+
+
+def _outcome_side(outcome: str | None) -> str | None:
+    text = (outcome or "").strip().lower()
+    if "over" in text:
+        return "over"
+    if "under" in text:
+        return "under"
+    return None
+
+
+def _looks_like_totals_market(market: dict) -> bool:
+    sports_type = str(market.get("sportsMarketType") or "").lower()
+    if "total" in sports_type:
+        return True
+    outcomes = _parse_outcomes(market)
+    if outcomes and any(_outcome_side(outcome) for outcome in outcomes):
+        return True
+    question = str(market.get("question") or market.get("title") or "").lower()
+    return "over" in question and "under" in question
+
+
+def _extract_totals_line(market: dict) -> float | None:
+    outcomes = _parse_outcomes(market)
+    lines: list[float] = []
+    for outcome in outcomes:
+        if not _outcome_side(outcome):
+            continue
+        match = re.search(r"(\d+(?:\.\d+)?)", str(outcome))
+        if match:
+            try:
+                lines.append(float(match.group(1)))
+            except ValueError:
+                continue
+    if lines:
+        return lines[0]
+
+    question = str(market.get("question") or market.get("title") or "")
+    match = re.search(r"(\d+(?:\.\d+)?)", question)
+    if match:
+        try:
+            return float(match.group(1))
+        except ValueError:
+            return None
     return None
 
 
@@ -1010,6 +1313,44 @@ def _extract_game_number(text: str) -> int | None:
     return None
 
 
+def _extract_market_liquidity(raw_json: dict | None) -> float:
+    """
+    Extract total volume (USD proxy for liquidity) from a Polymarket
+    event or market raw payload.
+
+    Tries event-level ``volume`` first, then sums across nested markets.
+    """
+    if not raw_json:
+        return 0.0
+
+    # Event-level volume (string or numeric)
+    event_vol = raw_json.get("volume")
+    if event_vol is not None:
+        try:
+            return float(event_vol)
+        except (ValueError, TypeError):
+            pass
+
+    # Sum market-level volumes
+    markets = raw_json.get("markets") or []
+    if not isinstance(markets, list):
+        return 0.0
+
+    total = 0.0
+    for m in markets:
+        if not isinstance(m, dict):
+            continue
+        for key in ("volume", "liquidity"):
+            val = m.get(key)
+            if val is not None:
+                try:
+                    total += float(val)
+                except (ValueError, TypeError):
+                    continue
+                break  # use first found per market
+    return total
+
+
 def _extract_series_type(market: dict | None) -> str | None:
     if not market:
         return None
@@ -1023,4 +1364,199 @@ def _extract_series_type(market: dict | None) -> str | None:
     if "bo5" in combined or "best of 5" in combined:
         return "bo5"
     return None
+
+
+def _load_goalserve_orientations() -> list[dict]:
+    if not settings.orientation_anchor_use_goalserve:
+        return []
+    client = GoalserveClient()
+    try:
+        payload = client.get_home()
+    except Exception as exc:
+        logger.warning("Goalserve orientation preload failed: %s", exc)
+        client.close()
+        return []
+    rows: list[dict] = []
+    try:
+        matches = client.filter_lol(client.extract_matches(payload))
+        for match in matches:
+            local = str((match.get("localteam") or {}).get("@name") or "").strip()
+            away = str((match.get("awayteam") or {}).get("@name") or "").strip()
+            if not local or not away:
+                continue
+            rows.append(
+                {
+                    "match_id": str(match.get("@id") or ""),
+                    "date": _parse_goalserve_date(match.get("@date")),
+                    "home_team": local,
+                    "away_team": away,
+                }
+            )
+    finally:
+        client.close()
+    return rows
+
+
+def _parse_goalserve_date(value: str | None) -> date | None:
+    if not value:
+        return None
+    text = str(value).strip()
+    try:
+        return datetime.strptime(text, "%d.%m.%Y").date()
+    except ValueError:
+        return None
+
+
+def _default_orientation_anchor() -> dict:
+    return {
+        "orientation_locked": False,
+        "team_a_is_home": None,
+        "home_team": None,
+        "away_team": None,
+        "orientation_anchor_source": None,
+        "orientation_anchor_confidence": 0.0,
+        "orientation_anchor_reason": "no_anchor",
+        "orientation_anchor_ts": datetime.now(tz=timezone.utc).isoformat(),
+    }
+
+
+def _resolve_orientation_anchor(
+    *,
+    op_fix: Fixture,
+    goalserve_orientations: list[dict],
+    oddspapi: OddsPapiClient,
+    odds_payload_cache: dict[str, dict],
+) -> dict:
+    anchor = _anchor_from_goalserve(op_fix, goalserve_orientations)
+    if anchor.get("orientation_locked"):
+        return anchor
+    if not settings.orientation_anchor_use_oddspapi_ids:
+        return anchor
+    anchor_from_ids = _anchor_from_oddspapi_ids(
+        op_fix=op_fix,
+        oddspapi=oddspapi,
+        odds_payload_cache=odds_payload_cache,
+    )
+    if anchor_from_ids.get("orientation_locked"):
+        return anchor_from_ids
+    if anchor.get("orientation_anchor_reason") == "no_anchor":
+        return anchor_from_ids
+    return anchor
+
+
+def _anchor_from_goalserve(op_fix: Fixture, goalserve_orientations: list[dict]) -> dict:
+    anchor = _default_orientation_anchor()
+    if not goalserve_orientations or not op_fix.team_a_name or not op_fix.team_b_name:
+        anchor["orientation_anchor_reason"] = "goalserve_unavailable"
+        return anchor
+
+    best_score = 0.0
+    best_row: dict | None = None
+    best_is_direct = True
+    best_margin = 0.0
+    op_date = op_fix.start_time.date() if op_fix.start_time else None
+
+    for row in goalserve_orientations:
+        row_date = row.get("date")
+        if op_date and row_date and op_date != row_date:
+            continue
+        home_team = str(row.get("home_team") or "")
+        away_team = str(row.get("away_team") or "")
+        direct = (similarity(op_fix.team_a_name, home_team) + similarity(op_fix.team_b_name, away_team)) / 2
+        swapped = (similarity(op_fix.team_a_name, away_team) + similarity(op_fix.team_b_name, home_team)) / 2
+        score = max(direct, swapped)
+        if score > best_score:
+            best_score = score
+            best_row = row
+            best_is_direct = direct >= swapped
+            best_margin = abs(direct - swapped)
+
+    anchor["orientation_anchor_confidence"] = best_score
+    anchor["orientation_anchor_source"] = "goalserve_pre"
+    if best_row is None:
+        anchor["orientation_anchor_reason"] = "goalserve_no_match"
+        return anchor
+
+    min_similarity = float(settings.orientation_anchor_min_similarity)
+    min_margin = float(settings.orientation_anchor_min_margin)
+    if best_score < min_similarity:
+        anchor["orientation_anchor_reason"] = "goalserve_low_similarity"
+        return anchor
+    if best_margin < min_margin:
+        anchor["orientation_anchor_reason"] = "goalserve_ambiguous_orientation"
+        return anchor
+
+    anchor["orientation_locked"] = True
+    anchor["team_a_is_home"] = best_is_direct
+    anchor["home_team"] = best_row.get("home_team")
+    anchor["away_team"] = best_row.get("away_team")
+    anchor["orientation_anchor_reason"] = "goalserve_locked"
+    return anchor
+
+
+def _anchor_from_oddspapi_ids(
+    *,
+    op_fix: Fixture,
+    oddspapi: OddsPapiClient,
+    odds_payload_cache: dict[str, dict],
+) -> dict:
+    anchor = _default_orientation_anchor()
+    source_id = str(op_fix.source_id)
+    payload = odds_payload_cache.get(source_id)
+    if payload is None:
+        try:
+            payload = oddspapi.get_odds(source_id)
+        except Exception:
+            anchor["orientation_anchor_reason"] = "oddspapi_odds_unavailable"
+            return anchor
+        odds_payload_cache[source_id] = payload
+
+    odds = OddsPapiClient.extract_pinnacle_moneyline(payload)
+    home = odds.get("home") if isinstance(odds, dict) else None
+    away = odds.get("away") if isinstance(odds, dict) else None
+    if not isinstance(home, dict) or not isinstance(away, dict):
+        anchor["orientation_anchor_reason"] = "oddspapi_no_moneyline"
+        return anchor
+
+    p1 = payload.get("participant1Id")
+    p2 = payload.get("participant2Id")
+    home_id = home.get("player_id")
+    away_id = away.get("player_id")
+    if None in (p1, p2, home_id, away_id):
+        anchor["orientation_anchor_reason"] = "oddspapi_missing_player_ids"
+        return anchor
+
+    p1s = str(p1)
+    p2s = str(p2)
+    homes = str(home_id)
+    aways = str(away_id)
+    if homes == p1s and aways == p2s:
+        team_a_is_home = True
+    elif homes == p2s and aways == p1s:
+        team_a_is_home = False
+    else:
+        anchor["orientation_anchor_reason"] = "oddspapi_id_mismatch"
+        return anchor
+
+    anchor["orientation_locked"] = True
+    anchor["team_a_is_home"] = team_a_is_home
+    anchor["home_team"] = op_fix.team_a_name if team_a_is_home else op_fix.team_b_name
+    anchor["away_team"] = op_fix.team_b_name if team_a_is_home else op_fix.team_a_name
+    anchor["orientation_anchor_source"] = "oddspapi_ids"
+    anchor["orientation_anchor_confidence"] = 1.0
+    anchor["orientation_anchor_reason"] = "oddspapi_locked"
+    return anchor
+
+
+def _apply_orientation_anchor(details_enriched: dict, orientation_anchor: dict) -> None:
+    details_enriched["orientation_locked"] = bool(orientation_anchor.get("orientation_locked"))
+    details_enriched["team_a_is_home"] = orientation_anchor.get("team_a_is_home")
+    details_enriched["home_team"] = orientation_anchor.get("home_team")
+    details_enriched["away_team"] = orientation_anchor.get("away_team")
+    details_enriched["orientation_anchor_source"] = orientation_anchor.get("orientation_anchor_source")
+    details_enriched["orientation_anchor_confidence"] = orientation_anchor.get(
+        "orientation_anchor_confidence"
+    )
+    details_enriched["orientation_anchor_reason"] = orientation_anchor.get("orientation_anchor_reason")
+    details_enriched["orientation_anchor_ts"] = orientation_anchor.get("orientation_anchor_ts")
 

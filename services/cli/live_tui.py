@@ -96,6 +96,13 @@ def _build_header(
     if pm_condition_id:
         market_hint = f"{market_hint} [{pm_condition_id[:10]}…]" if market_hint else pm_condition_id[:10]
     center_label = f"{match_label} | {mode_label.upper()}"
+    if snapshot:
+        orient_state = "LOCKED" if snapshot.orientation_locked else "UNLOCKED"
+        orient_source = snapshot.orientation_source or "-"
+        conflict_flag = " CONFLICT" if snapshot.orientation_conflict else ""
+        center_label = (
+            f"{center_label} | ORIENT {orient_state}:{orient_source}{conflict_flag}"
+        )
     if market_hint:
         center_label = f"{center_label} | {market_hint}"
     table.add_row(
@@ -113,7 +120,7 @@ def _build_focus_panel(snapshots: list[FocusSnapshot], spread_factor: float) -> 
     table = Table(show_header=True, header_style="bold", box=box.SIMPLE, expand=True)
     table.add_column("Market", no_wrap=True)
     table.add_column("Team", no_wrap=True)
-    table.add_column("Pinnacle p_ref", justify="right", no_wrap=True)
+    table.add_column("p_ref", justify="right", no_wrap=True)
     table.add_column("PM ask", justify="right", no_wrap=True)
     table.add_column("PM (bid/ask spr)", justify="right")
     table.add_column("Edge", justify="right", no_wrap=True)
@@ -122,7 +129,7 @@ def _build_focus_panel(snapshots: list[FocusSnapshot], spread_factor: float) -> 
         if snap_idx > 0:
             # Visual separator between market groups
             table.add_row("", "", "", "", "", "")
-        a_label, b_label = _split_match(snapshot.match)
+        a_label, b_label = _snapshot_side_labels(snapshot)
         for side_label, p_ref, bid, ask in (
             (a_label, snapshot.p_ref_a, snapshot.bid_a, snapshot.ask_a),
             (b_label, snapshot.p_ref_b, snapshot.bid_b, snapshot.ask_b),
@@ -135,20 +142,30 @@ def _build_focus_panel(snapshots: list[FocusSnapshot], spread_factor: float) -> 
             edge_style = ""
             if edge is not None:
                 edge_style = "bold green" if edge > 0.02 else "bold red" if edge < -0.02 else ""
-            p_ref_cell = Text(f"{p_ref:.3f}" if p_ref is not None else "-", style="bold")
+            p_ref_value = f"{p_ref:.3f}" if p_ref is not None else "-"
+            p_ref_cell = Text(p_ref_value, style="bold")
+            if snapshot.p_ref_source == "derived_series" and p_ref is not None:
+                p_ref_cell = Text(f"{p_ref_value}*", style="bold italic")
             pm_ask_cell = Text(f"{ask:.3f}" if ask is not None else "-", style="bold")
             pm_detail = "-"
             if bid is not None and ask is not None:
                 spr_str = f"{spr:.3f}" if spr is not None else "-"
                 pm_detail = f"{bid:.3f}/{ask:.3f} {spr_str}"
             table.add_row(
-                format_market_label(snapshot.market_type, snapshot.game_number),
+                format_market_label(
+                    snapshot.market_type,
+                    snapshot.game_number,
+                    snapshot.line_value,
+                    snapshot.p_ref_source,
+                ),
                 side_label,
                 p_ref_cell,
                 pm_ask_cell,
                 Text(pm_detail, style="dim"),
                 Text(f"{edge:+.2%}" if edge is not None else "-", style=edge_style),
             )
+    if any(s.p_ref_source == "derived_series" for s in snapshots):
+        table.add_row("", "", "", "", "", Text("* derived from series moneyline", style="italic dim"))
     return table
 
 
@@ -160,6 +177,14 @@ def _split_match(match: str) -> tuple[str, str]:
         if left and right:
             return left, right
     return "A", "B"
+
+
+def _snapshot_side_labels(snapshot: FocusSnapshot) -> tuple[str, str]:
+    if snapshot.market_type == "totals":
+        a = (snapshot.side_a_label or "OVER").strip()
+        b = (snapshot.side_b_label or "UNDER").strip()
+        return a, b
+    return _split_match(snapshot.match)
 
 
 def _format_ts(dt: datetime | None) -> str:
