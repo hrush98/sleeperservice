@@ -1,7 +1,7 @@
 """
-Tiny NDJSON logger for Cursor debug mode.
+Tiny NDJSON logger for agent debug output.
 
-Writes one JSON object per line to: /home/hmrush/Desktop/sleeperservice/.cursor/debug.log
+Writes one JSON object per line to a repo-local log file by default.
 
 NOTE: Do not log secrets (API keys, tokens, PII).
 """
@@ -9,11 +9,14 @@ NOTE: Do not log secrets (API keys, tokens, PII).
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any
 
-_DEBUG_LOG_PATH = Path("/home/hmrush/Desktop/sleeperservice/.cursor/debug.log")
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_DEFAULT_DEBUG_LOG_PATH = _REPO_ROOT / "logs" / "agent_debug.ndjson"
+_DEBUG_LOG_PATH = Path(os.getenv("AGENT_DEBUG_LOG_PATH", _DEFAULT_DEBUG_LOG_PATH))
 
 
 def agent_log(
@@ -41,4 +44,3 @@ def agent_log(
     except (OSError, ValueError, TypeError):
         # Never let debug logging break runtime paths.
         return
-

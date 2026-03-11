@@ -220,6 +220,8 @@ These are decisions that may change implementation order or exact structure.
 - designated `target-architecture.md` as end-state reference
 - designated `engineering-improvements.md` as engineering-quality reference
 - set active focus to `Phase 0 - repo stabilization`
+- established repo-root `AGENTS.md` as the Codex instruction entrypoint
+- retired tracked Cursor rule files as a source of truth
 
 ## Session handoff template
 

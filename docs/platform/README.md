@@ -2,6 +2,8 @@
 
 This folder is the forward-looking planning surface for the repo.
 
+For Codex-driven work, start with the repo-root `AGENTS.md` file, which points into this docs set.
+
 Use these documents for:
 - target architecture
 - engineering cleanup and modernization

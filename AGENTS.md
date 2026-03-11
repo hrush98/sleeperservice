@@ -30,14 +30,23 @@ Before making a meaningful change:
 ## Engineering Rules
 
 - Use the `poly` conda environment when commands depend on the project runtime.
+- Run the most relevant tests or verification commands after changes.
+- Add tests when behavior changes and the codebase has a sensible place for them.
 - Do not hardcode secrets in tracked files.
 - Put durable tunables and timing constants in shared configuration rather than scattering them.
+- Do not create ad hoc markdown notes for implementation work. Put durable documentation in the existing docs structure.
 - Keep new documentation in established locations such as `docs/platform/`, `docs/research/`, or `docs/adr/`.
 - When architecture, runtime boundaries, or workflow expectations change, update the relevant platform docs.
+
+## Tooling Notes
+
+- Cursor is no longer the canonical workflow for this repo.
+- Do not add or maintain `.cursor/` rule files as a source of truth.
+- Keep agent-facing repo guidance in `AGENTS.md`.
+- Prefer generic repo logging and debug paths over editor-specific directories.
 
 ## Git Workflow
 
 - Branch feature work from `dev`.
 - Merge feature branches into `dev`.
 - Promote `dev` into `master`.
-
