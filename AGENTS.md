@@ -38,6 +38,13 @@ Before making a meaningful change:
 - Keep new documentation in established locations such as `docs/platform/`, `docs/research/`, or `docs/adr/`.
 - When architecture, runtime boundaries, or workflow expectations change, update the relevant platform docs.
 
+## Changelog Rules
+
+- `docs/changelog.md` is the root and cross-cutting changelog for the repo.
+- `docs/coherence/changelog.md` is the service-specific changelog for coherence work.
+- If a change materially affects architecture, runtime boundaries, schema, strategy behavior, config surface, or verification workflow, append an entry to the relevant changelog.
+- Follow the entry format defined at the top of each changelog file instead of inventing a new format.
+
 ## Tooling Notes
 
 - Cursor is no longer the canonical workflow for this repo.
