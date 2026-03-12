@@ -47,7 +47,8 @@ If implementation needs to change:
 ### Overall status
 - active branch: `phase_0`
 - current focus: `Phase 0 - repo stabilization`
-- next milestone: packaging cleanup and dead worker cleanup
+- parallel planning focus: `Phase 0.5 - historical research foundation`
+- next milestone: finish the current Phase 0 cleanup slice and decide when H0 dataset landing starts
 
 ## Phase summary
 
@@ -65,6 +66,25 @@ If implementation needs to change:
     - `Workstream 1: Packaging and bootstrapping`
     - `Workstream 7: Documentation reset`
     - `P0 - immediate`
+
+### Phase 0.5 - Historical research foundation
+- status: planned
+- objective:
+  - create the historical-trades foundation for replay, calibration, and execution analytics
+  - move research and empirical strategy validation earlier in the platform sequence
+  - keep raw external data outside the live runtime and app database
+- primary references:
+  - `historical-research-workstream.md`
+    - `Workstream phases`
+    - `Recommended implementation boundaries`
+    - `Open decisions`
+  - `engineering-improvements.md`
+    - `Workstream 3: Research and replay`
+  - `future-strategy-avenues.md`
+    - `Foundational capability - historical research and replay`
+  - `docs/research/reference-library.md`
+    - `Becker Prediction Markets Dataset`
+    - `Guide 6 - Historical trades / calibration / maker-taker guide`
 
 ### Phase 1 - Shared domain extraction
 - status: not started
@@ -139,27 +159,48 @@ If implementation needs to change:
 ### Phase 0 task list
 
 #### P0.1 Packaging and imports
-- status: not started
+- status: complete
+- completed:
+  - adopted `services.*` as the canonical package namespace for Phase 0
+  - migrated code, tests, and Alembic imports away from bare `shared.*`, `cli.*`, `api.*`, and `coherence.*`
+  - removed `sys.path` mutation from test conftests and test modules
 - target:
   - choose one canonical package namespace
   - stop relying on `sys.path` mutation in tests
   - stop mixing `services.*`, `shared.*`, and `cli.*` imports
 
 #### P0.2 Project metadata and commands
-- status: not started
+- status: complete
+- completed:
+  - added `pyproject.toml`
+  - defined package discovery, console scripts, and pytest collection defaults
+  - updated the API container to install the repo package and boot with `services.api.main:app`
+  - documented the canonical install/run/test commands in `README.md`
 - target:
   - add `pyproject.toml`
   - define canonical install/test commands
   - make local and CI execution predictable
 
 #### P0.3 Dead worker and infra cleanup
-- status: not started
+- status: partially complete
+- completed:
+  - removed the stale `worker` compose service that referenced a missing Dockerfile
+  - updated in-repo runtime/tool command references to the canonical `services.*` module paths
+- remaining:
+  - align remaining top-level docs and instructions with the current runtime model
 - target:
   - remove stale worker references from docker/instructions
   - align compose and docs with the current runtime model
 
 #### P0.4 Config and secret cleanup
-- status: not started
+- status: partially complete
+- completed:
+  - removed the hardcoded Goalserve feed key from tracked config defaults
+  - added a tracked `.env.example` template and allowed it through `.gitignore`
+  - fixed the default secret-path typo from `~/.sleeprservice/...` to `~/.sleeperservice/...`
+  - tightened Goalserve client behavior so missing config fails explicitly
+- remaining:
+  - break the monolithic settings file into cleaner runtime/domain groupings later in Phase 0 or Phase 1
 - target:
   - remove hardcoded secrets from tracked config
   - separate config concerns more cleanly
@@ -170,9 +211,10 @@ If implementation needs to change:
 - completed:
   - created `docs/platform/`
   - created `docs/research/reference-library.md`
+  - rewrote `README.md` around the canonical Phase 0 package/install/run model
 - remaining:
   - decide how and when to retire or relabel MVP-era top-level docs
-  - update README after the first code refactor lands
+  - align additional legacy top-level docs with the new platform references
 
 ### Recommended execution order inside Phase 0
 
@@ -182,17 +224,61 @@ If implementation needs to change:
 4. config and secret cleanup
 5. README/doc reset for the new execution model
 
+## Phase 0.5 - Historical research foundation
+
+### Goals
+- create a reproducible historical research entrypoint
+- build a normalized research layer over external trade data
+- generate the first durable calibration and execution studies
+- keep this work isolated from live runtime coupling at first
+
+### Phase 0.5 task list
+
+#### P0.5.1 Dataset landing and audit
+- status: planned
+- target:
+  - define dataset-path conventions
+  - add a schema and venue profiler
+  - document raw-dataset boundaries and quality checks
+
+#### P0.5.2 Normalized research layer
+- status: planned
+- target:
+  - create stable analytical views for historical markets, trades, resolutions, and trade features
+  - separate venue-specific outputs from blended assumptions
+
+#### P0.5.3 Baseline empirical studies
+- status: planned
+- target:
+  - produce calibration surfaces
+  - produce maker/taker expectancy summaries
+  - produce first empirical sizing and execution priors
+
+#### P0.5.4 Platform hooks
+- status: planned
+- target:
+  - define how historical outputs feed replay, ranking, risk, and analysis APIs later
+  - avoid direct live-runtime integration in the first slice
+
+### Recommended execution order inside Phase 0.5
+
+1. dataset landing and audit
+2. normalized research layer
+3. baseline empirical studies
+4. platform-hook contracts
+
 ## Open decisions
 
 These are decisions that may change implementation order or exact structure.
 
 ### D1 - Canonical package namespace
-- status: open
+- status: decided
 - options:
   - keep `services/` and introduce `services/app/...`
   - introduce a new top-level package name and migrate gradually
-- current bias:
-  - keep `services/` as the repo-root execution area and introduce a canonical package under it
+- decision:
+  - use `services.*` as the canonical package namespace during Phase 0
+  - reserve `services/app/...` as a later structural extraction, not a prerequisite for stabilization
 
 ### D2 - Treatment of legacy docs
 - status: open
@@ -212,6 +298,15 @@ These are decisions that may change implementation order or exact structure.
   - stay disciplined
   - keep Phase 0 focused on stabilization, not architectural ambition
 
+### D4 - Start timing for Phase 0.5
+- status: open
+- question:
+  - should H0/H1 start only after all remaining Phase 0 cleanup lands
+  - or can isolated historical-research work begin once the current package and command model is stable enough
+- current bias:
+  - finish the current Phase 0 slice
+  - then allow isolated H0/H1 work to begin before the rest of the deeper refactor sequence
+
 ## Change log for this roadmap
 
 ### 2026-03-11
@@ -222,6 +317,14 @@ These are decisions that may change implementation order or exact structure.
 - set active focus to `Phase 0 - repo stabilization`
 - established repo-root `AGENTS.md` as the Codex instruction entrypoint
 - retired tracked Cursor rule files as a source of truth
+- completed P0.1 by standardizing on `services.*` imports and removing test path hacks
+- partially completed P0.2 with `pyproject.toml`, package entry points, and pytest defaults
+- partially completed P0.3 by removing the stale compose worker service and package-path footguns
+- completed P0.2 by documenting canonical install/run/test commands in `README.md`
+- partially completed P0.4 by removing tracked secret defaults and adding `.env.example`
+- advanced P0.5 by rewriting `README.md` for the restructure-era execution model
+- introduced `Phase 0.5 - Historical research foundation` as an earlier research/replay workstream
+- added `historical-research-workstream.md` as the dedicated planning document for guide6-driven work
 
 ## Session handoff template
 
@@ -233,5 +336,7 @@ We are in <phase>.
 Please check the active phase section, follow the listed execution order,
 and use docs/platform/target-architecture.md plus
 docs/platform/engineering-improvements.md as supporting references.
+If working on the historical-trades foundation, also use
+docs/platform/historical-research-workstream.md.
 Before making changes, update the roadmap status if needed.
 ```

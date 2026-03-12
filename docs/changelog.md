@@ -20,6 +20,79 @@ flowchart TD
   poller -->|focus_only| ws[Polymarket_WS_subscriptions]
   trader -->|focus_only| trading[TradeSignals_and_CLOB_exec]
 
+## 2026-03-12 — Historical research foundation promoted to Phase 0.5
+
+### What changed
+- Added a dedicated planning document for the historical-trades foundation in `docs/platform/historical-research-workstream.md`.
+- Updated the mutable roadmap to insert `Phase 0.5 - Historical research foundation` between repo stabilization and broader platform expansion.
+- Updated future-strategy planning so historical research and replay are treated as a highest-priority foundation rather than a later convenience.
+- Kept the target architecture largely unchanged; this is primarily a sequencing and planning update.
+
+### Design decisions
+- Treat guide6-style historical trade data as a foundational workstream for replay, calibration, execution analytics, and empirical sizing.
+- Keep raw external datasets outside git and outside the app Postgres database; use them as read-only research inputs.
+- Move research and replay earlier in the mutable roadmap without coupling the first slice into the live runtime.
+
+### Why
+This repo needs a more reliable path to sophistication than fragile live external event-state feeds. Historical prediction-market trade data offers that path and should shape replay, execution policy, and later API products much earlier.
+
+### Impact
+- No runtime migration yet.
+- Future work now has a dedicated `Phase 0.5` planning reference before deeper platform refactors continue.
+- Historical-research outputs are now expected to become inputs to replay, ranking, risk, and analysis APIs later.
+
+### How to verify
+- `sed -n '1,260p' docs/platform/historical-research-workstream.md` — confirm the dedicated plan exists with H0-H4 phases.
+- `sed -n '1,320p' docs/platform/implementation-roadmap.md` — confirm `Phase 0.5` appears in the roadmap.
+- `sed -n '1,240p' docs/platform/future-strategy-avenues.md` — confirm historical research and replay are now called out as a foundational capability.
+- `sed -n '1,120p' docs/changelog.md` — confirm this entry appears above the restructure kickoff entry.
+
+```mermaid
+flowchart TD
+  p0[Phase 0: Repo stabilization] --> p05[Phase 0.5: Historical research foundation]
+  p05 --> p1[Phase 1: Shared domain extraction]
+  p05 --> replay[Replay, calibration, execution analytics]
+  replay --> api[Analysis API]
+  replay --> trading[Private trading priors]
+```
+
+## 2026-03-12 — Phase 0 restructure kickoff and Codex workflow baseline
+
+### What changed
+- Established the restructure baseline on `dev` / `master`, with `phase_0` as the active feature branch for the first platform-cleanup pass.
+- Added the new platform planning set under `docs/platform/`, with `implementation-roadmap.md` as the mutable execution reference for upcoming phases.
+- Added repo-root `AGENTS.md` as the Codex instruction entrypoint and retired tracked Cursor rule files as a source of truth.
+- Kept `docs/changelog.md` as the canonical root changelog so future phase work continues in the same history instead of starting a parallel Codex-era log.
+
+### Design decisions
+- Use `docs/platform/implementation-roadmap.md` for sequencing and status, while keeping `docs/platform/target-architecture.md` and `docs/platform/engineering-improvements.md` comparatively stable.
+- Keep the existing root changelog and continue appending to it for cross-cutting and platform changes.
+- Use `dev` as the integration branch, promote into `master`, and treat `phase_0` as the first restructure branch rather than rewriting history again later.
+
+### Why
+The repo is entering a multi-phase restructure. This entry marks the transition point so subsequent Phase 0 and later platform changes have a clear documented starting boundary.
+
+### Impact
+- No runtime migration from this entry alone.
+- Future restructure work should reference the platform docs and append progress to this changelog as phases land.
+- Codex sessions now have a repo-native instruction source and a single mutable roadmap for continuity across sessions.
+
+### How to verify
+- `git branch -vv` — confirm `dev`, `master`, and `phase_0` exist with `phase_0` as the active working branch.
+- `sed -n '1,220p' AGENTS.md` — confirm the repo-root Codex guidance points to `docs/platform/`.
+- `sed -n '1,260p' docs/platform/implementation-roadmap.md` — confirm the active phase and roadmap structure are present.
+- `sed -n '1,120p' docs/changelog.md` — confirm this kickoff entry appears above prior feature-level entries.
+
+```mermaid
+flowchart TD
+  ag[AGENTS.md] --> roadmap[docs/platform/implementation-roadmap.md]
+  roadmap --> target[docs/platform/target-architecture.md]
+  roadmap --> eng[docs/platform/engineering-improvements.md]
+  phase0[phase_0 branch] --> dev[dev branch]
+  dev --> master[master branch]
+  phase0 --> changelog[docs/changelog.md]
+```
+
 ## 2026-02-21 — Strategy mode prompt (Lead Lag / Binary / Both) and single-tape UI
 
 ### What changed

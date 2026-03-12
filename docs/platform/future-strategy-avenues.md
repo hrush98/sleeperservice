@@ -9,6 +9,32 @@ That implies a better strategy roadmap:
 - treat external feeds as optional amplifiers, not architectural dependencies
 - only add feed-driven strategies when the source can be normalized and scored for confidence
 
+## Foundational capability - Historical research and replay
+
+This is not a direct strategy lane.
+
+It is a foundational capability that should move earlier in the roadmap because it supports:
+- replay
+- calibration
+- execution analytics
+- empirical sizing
+- historical analog lookup
+
+Why it matters:
+- gives the platform a Polymarket-native path to sophistication
+- reduces dependence on unreliable live event-state feeds
+- improves both private trading and analysis API product quality
+
+What to add:
+- external historical dataset profiling
+- normalized research views
+- calibration-surface generation
+- maker/taker expectancy analysis
+- derived priors for replay, ranking, and risk
+
+Priority:
+- highest foundational workstream
+
 ## Strategy classes
 
 ## Class A - Polymarket-native strategies
@@ -180,6 +206,7 @@ Why defer:
 ## Recommended expansion order
 
 ### Stage 1
+- historical research foundation
 - coherence into the shared platform
 - signal ledger
 - replay support
@@ -200,6 +227,9 @@ Why defer:
 ## API product angle
 
 The best customer-facing outputs are likely:
+- historical calibration surfaces
+- execution analytics and maker/taker tendency summaries
+- historical analog lookup
 - coherence findings
 - fair-value deltas
 - semantic duplicate detection
@@ -212,6 +242,8 @@ These are better API products than:
 ## Private trading angle
 
 The strongest private-trading priorities are:
+- empirical execution priors
+- uncertainty-aware sizing from historical distributions
 - polymarket-native structural edge
 - execution quality
 - confidence-aware ranking

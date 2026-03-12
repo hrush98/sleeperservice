@@ -174,6 +174,25 @@ Use this document as the canonical reference index when building new strategy or
   - fair-value API explanations
   - stock or crypto threshold market modeling
 
+### 11. Becker Prediction Markets Dataset
+- Link: https://github.com/beckerben/prediction-markets-data
+- Type: public historical trade dataset repository
+- Main content:
+  - large-scale historical prediction-market trade data
+  - parquet-based storage and local query workflow
+  - market metadata and resolved outcomes
+- Why it matters here:
+  - strongest current candidate for bootstrapping replay, calibration, and execution research before the repo accumulates enough of its own long-horizon history
+  - directly supports Polymarket-native work that does not depend on fragile external event-state feeds
+- Caution:
+  - dataset quality, venue coverage, and schema need audit before being treated as a modeling foundation
+  - trade prints are not the same thing as full order book state or queue position
+- Recommended use:
+  - replay and experiment system
+  - calibration-surface work
+  - maker/taker expectancy analysis
+  - historical analog lookup
+
 ## Guide-derived references and judgments
 
 ### Guide 1 - LMSR / EV / Kelly thread
@@ -224,6 +243,21 @@ Use this document as the canonical reference index when building new strategy or
 - Use as:
   - strongest expansion direction alongside coherence
 
+### Guide 6 - Historical trades / calibration / maker-taker guide
+- Repo file: `docs/strategy_ref/guide6.md`
+- Keep:
+  - historical trade data as a research foundation
+  - empirical calibration thinking
+  - maker vs taker decomposition
+  - uncertainty-aware sizing as a research input
+- Main caution:
+  - the “hedge fund blueprint” framing is more promotional than methodological
+  - do not treat generic empirical Kelly outputs as live sizing without conditioning by market family, liquidity, time-to-resolution, and venue
+  - do not assume trade data alone fully recovers order-book economics
+- Use as:
+  - one of the best inputs for replay, risk calibration, and execution analytics
+  - a strong fit for Polymarket-native sophistication when external live feeds are unreliable
+
 ## How these references map to the platform
 
 ### For architecture
@@ -237,21 +271,29 @@ Use this document as the canonical reference index when building new strategy or
 - Black-Scholes style prediction-market paper
 - combinatorial market-making paper
 
+### For replay, calibration, and execution analytics
+- Becker prediction markets dataset
+- Guide 6
+- arbitrage in prediction markets paper
+
 ### For trader process and risk discipline
 - Hanson scoring-rule background
 - EV / Bayes / Kelly guide material
+- Guide 6 when used as a conditioning and sizing reference rather than a direct trading recipe
 - Damodaran note for threshold-probability explanations
 
 ## Recommended reading order
 
 1. Polymarket trading overview
 2. Polymarket orders overview
-3. Unravelling the Probabilistic Forest
-4. Semantic Non-Fungibility
-5. Guide 5
-6. Guide 4
-7. Hanson market scoring rules
-8. Toward Black Scholes for Prediction Markets
+3. Becker prediction markets dataset
+4. Guide 6
+5. Unravelling the Probabilistic Forest
+6. Semantic Non-Fungibility
+7. Guide 5
+8. Guide 4
+9. Hanson market scoring rules
+10. Toward Black Scholes for Prediction Markets
 
 ## Notes
 
