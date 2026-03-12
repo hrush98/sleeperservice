@@ -10,8 +10,8 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func, select
 
-from shared.db import SessionLocal
-from shared.models import Fixture, Position, TradeEvent
+from services.shared.db import SessionLocal
+from services.shared.models import Fixture, Position, TradeEvent
 
 
 def analyze_command(

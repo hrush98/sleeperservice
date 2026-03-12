@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from coherence.models import RankedOpportunity, Violation
-from shared.polymarket_client import PolymarketClient
+from services.coherence.models import RankedOpportunity, Violation
+from services.shared.polymarket_client import PolymarketClient
 
 
 def rank_violations_with_orderbook(
@@ -98,4 +98,3 @@ def _avg_fill_price(book: dict, side: str, target_size_usd: float) -> tuple[floa
     if remaining > 1e-9 or shares <= 0:
         return 1.0, False
     return spent / shares, True
-

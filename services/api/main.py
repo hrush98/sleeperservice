@@ -9,8 +9,8 @@ Minimal API with only operations endpoints:
 
 from fastapi import FastAPI
 
-from api.routers.health import router as health_router
-from api.routers.ops import router as ops_router
+from services.api.routers.health import router as health_router
+from services.api.routers.ops import router as ops_router
 
 app = FastAPI(
     title="LoL Lead-Lag Arbitrage Bot API",

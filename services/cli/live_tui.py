@@ -14,7 +14,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
-from shared.config import settings
+from services.shared.config import settings
 from .monitor_types import FocusSnapshot, LogBuffer, PerfStats, format_market_label
 
 StrategyMode = Literal["lead_lag", "binary", "both"]

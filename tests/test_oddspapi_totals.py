@@ -1,4 +1,4 @@
-from shared.oddspapi_client import OddsPapiClient
+from services.shared.oddspapi_client import OddsPapiClient
 
 
 def _payload_with_totals(*, market_id: str = "line/totals", line: str = "3.5") -> dict:

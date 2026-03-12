@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from coherence.models import (
+from services.coherence.models import (
     ComplementFinding,
     DateCascade,
     FamilyAssignment,
@@ -16,7 +16,7 @@ from coherence.models import (
     StrategyType,
     Violation,
 )
-from shared.config import settings
+from services.shared.config import settings
 
 RANGE_THRESHOLD_PATTERN = re.compile(
     r"(?:\bover\b|\bunder\b|\babove\b|\bbelow\b|\bat least\b|\bat most\b|<=|>=|<|>)",
@@ -321,4 +321,3 @@ def _subset_overlap_ratio(subset_text: str, superset_text: str) -> float:
         return 0.0
     overlap = len(subset_tokens.intersection(superset_tokens))
     return overlap / len(subset_tokens)
-

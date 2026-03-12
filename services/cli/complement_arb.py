@@ -11,12 +11,12 @@ from threading import Event
 from datetime import datetime, timezone
 from uuid import uuid4
 
-from shared.clob_executor import ClobExecutor, OrderSubmission
-from shared.config import settings
-from shared.db import SessionLocal
-from shared.edge import ComplementEdgeResult, compute_complement_edge, compute_vwap
-from shared.models import ComplementArb, Fixture, Mapping, OrderAttempt, Position, TradeEvent
-from shared.polymarket_ws import BookState, PolymarketWSManager
+from services.shared.clob_executor import ClobExecutor, OrderSubmission
+from services.shared.config import settings
+from services.shared.db import SessionLocal
+from services.shared.edge import ComplementEdgeResult, compute_complement_edge, compute_vwap
+from services.shared.models import ComplementArb, Fixture, Mapping, OrderAttempt, Position, TradeEvent
+from services.shared.polymarket_ws import BookState, PolymarketWSManager
 
 from .monitor_types import ComplementArbRecord, ComplementArbState, FocusSnapshot, LogBuffer
 from .poller import SingleMatchPoller

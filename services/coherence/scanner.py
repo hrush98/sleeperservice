@@ -9,9 +9,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from coherence.models import CandidateEvent, FamilyAssignment, FamilyType, MarketInfo, StrategyCandidate, StrategyType
-from shared.config import settings
-from shared.polymarket_client import PolymarketClient
+from services.coherence.models import (
+    CandidateEvent,
+    FamilyAssignment,
+    FamilyType,
+    MarketInfo,
+    StrategyCandidate,
+    StrategyType,
+)
+from services.shared.config import settings
+from services.shared.polymarket_client import PolymarketClient
 
 logger = logging.getLogger(__name__)
 _semantic_model: Any | None = None
@@ -568,4 +575,3 @@ def _to_float(value: Any) -> float:
         return float(value)
     except (TypeError, ValueError):
         return 0.0
-

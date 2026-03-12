@@ -29,7 +29,9 @@ Before making a meaningful change:
 
 ## Engineering Rules
 
-- Use the `poly` conda environment when commands depend on the project runtime.
+- Use the `sleeperservice` conda environment for local project runtime commands.
+- Install project packages and dependencies into `sleeperservice`; do not rely on system or user-site packages outside that env.
+- The repo currently declares Python `>=3.11`, so the local `sleeperservice` env should use Python 3.11+.
 - Run the most relevant tests or verification commands after changes.
 - Add tests when behavior changes and the codebase has a sensible place for them.
 - Do not hardcode secrets in tracked files.

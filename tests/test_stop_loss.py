@@ -1,7 +1,7 @@
 """Tests for thesis-death and hard-stop exit guards."""
 
 # pylint: disable=import-error
-from shared.edge import check_hard_stop, check_thesis_death
+from services.shared.edge import check_hard_stop, check_thesis_death
 
 
 # ── thesis death ──────────────────────────────────────────────

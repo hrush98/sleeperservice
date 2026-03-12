@@ -1,10 +1,10 @@
-from coherence.checks import (
+from services.coherence.checks import (
     find_complement_findings,
     find_implication_findings,
     find_monotonicity_violations,
     find_partition_sum_findings,
 )
-from coherence.models import (
+from services.coherence.models import (
     CandidateEvent,
     DateCascade,
     FamilyType,
@@ -13,8 +13,8 @@ from coherence.models import (
     PartitionStatus,
     Violation,
 )
-from coherence.ranker import rank_violations_with_orderbook
-from coherence.scanner import assign_families
+from services.coherence.ranker import rank_violations_with_orderbook
+from services.coherence.scanner import assign_families
 
 
 def _market(question: str, yes: float, no: float, parsed_date: str, yes_id: str, no_id: str) -> MarketInfo:
@@ -182,4 +182,3 @@ def test_find_implication_findings_flags_gap() -> None:
     assert findings[0].status == PairStatus.VALID_PAIR
     assert findings[0].is_violation is True
     assert round(findings[0].gap, 2) == 0.06
-

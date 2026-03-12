@@ -1,8 +1,8 @@
 """Shared utilities for LoL Lead-Lag Arbitrage Bot."""
 
-from shared.config import settings
-from shared.db import Base, SessionLocal, engine, get_db_session
-from shared.models import (
+from services.shared.config import settings
+from services.shared.db import Base, SessionLocal, engine, get_db_session
+from services.shared.models import (
     Fixture,
     League,
     Mapping,
@@ -12,8 +12,8 @@ from shared.models import (
     Team,
     TradeEvent,
 )
-from shared.oddspapi_client import OddsPapiClient, get_client as get_oddspapi_client
-from shared.polymarket_client import PolymarketClient, get_client as get_polymarket_client
+from services.shared.oddspapi_client import OddsPapiClient, get_client as get_oddspapi_client
+from services.shared.polymarket_client import PolymarketClient, get_client as get_polymarket_client
 
 __all__ = [
     # Config
@@ -38,4 +38,3 @@ __all__ = [
     "get_oddspapi_client",
     "get_polymarket_client",
 ]
-

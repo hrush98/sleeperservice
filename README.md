@@ -1,220 +1,119 @@
-# LoL Lead-Lag Arbitrage Bot (v2)
+# SleeperService
 
-Detect and exploit short-lived lead-lag inefficiencies between Pinnacle odds (via OddsPapi) and Polymarket LoL CLOB markets.
+Polymarket trading and analysis platform for esports-focused strategies.
 
-## Overview
+The repo is in the middle of the platform restructure documented in:
 
-This bot compares prices between:
-- **Pinnacle** (via OddsPapi) — fast-moving sharp bookmaker
-- **Polymarket** — prediction market CLOB (slower to reprice)
+- `docs/platform/implementation-roadmap.md`
+- `docs/platform/target-architecture.md`
+- `docs/platform/engineering-improvements.md`
 
-When Pinnacle moves, there's a brief window where Polymarket is stale. We detect that window, measure it, and record shadow orders for later analysis.
+Phase 0 is focused on making the repo repeatable to install, run, and test.
 
-## Architecture
+## Current runtimes
 
-Two-mode CLI system:
-1. **Discovery** (`cli discover`) — on-demand collection of upcoming matches
-2. **Live** (`cli live`) — real-time odds comparison during live matches
+- `services.cli`: operational CLI for discovery, live monitoring, and strategy tools
+- `services.api`: FastAPI service for health and ops endpoints
+- `services.coherence`: market-family scanner for coherence analysis
 
-Target leagues: LCK, LPL, LEC, LCS/LTA, LCP, CBLOL (top 6 LoL leagues)
+## Quick start
 
-## Prerequisites
+### 1. Create a local env file
 
-- Docker + Docker Compose (for Postgres)
-- Python 3.11+ with conda environment `poly`
-- API keys: `ODDS_API_KEY` (OddsPapi), `POLY_API_KEY` (Polymarket, optional)
+```bash
+cp .env.example .env
+```
 
-## Setup
+Fill in the keys you actually need:
 
-### 1. Start Postgres
+- `DATABASE_URL` is required
+- `ODDS_API_KEY` is required for OddsPapi-backed discovery and live odds
+- `GOALSERVE_FEED_KEY` is required for Goalserve-backed features
+- `POLY_API_KEY` and the Polymarket signing settings are only needed for authenticated Polymarket operations
+
+### 2. Install the project
+
+```bash
+python -m pip install -e .
+```
+
+### 3. Start Postgres
 
 ```bash
 docker compose -f infra/docker-compose.yml up -d postgres
 ```
 
-### 2. Activate conda environment
+### 4. Apply migrations
 
 ```bash
-conda activate poly
+alembic -c alembic.ini upgrade head
 ```
 
-### 3. Install dependencies
+## Canonical commands
+
+### CLI
 
 ```bash
-pip install -r requirements.txt
+python -m services.cli discover --days 7
+python -m services.cli live
+python -m services.cli status
 ```
 
-### 4. Set environment variables
-
-Create a `.env` file in the project root (copy from `.env.example`):
+After editable install, the console script is also available:
 
 ```bash
-cp .env.example .env
-# Then edit .env and add your API keys
+sleeperservice discover --days 7
 ```
 
-The `.env` file will be automatically loaded when you run CLI commands. No need to manually export variables!
-
-### 5. Run migrations
+### API
 
 ```bash
-cd services
-alembic -c ../alembic.ini upgrade head
+uvicorn services.api.main:app --host 0.0.0.0 --port 8000
 ```
 
-## Usage
-
-### Discovery — collect upcoming matches
+### Coherence scanner
 
 ```bash
-cd services
-python -m cli discover --days 7
+python -m services.coherence scan --cache-only
 ```
 
-Expected output:
-```
-🔍 Discovering LoL matches for next 7 days...
+## Testing
 
-📋 Fetching OddsPapi tournaments...
-   Found 5 target leagues from 42 total
-
-👥 Fetching OddsPapi participants...
-   Found 234 teams
-
-🎮 Fetching OddsPapi fixtures...
-   LCK: 8 fixtures
-   LPL: 12 fixtures
-   ...
-   Total: 28 OddsPapi fixtures
-
-🔮 Fetching Polymarket markets...
-   Found 15 LoL-related markets
-
-🔗 Building mappings...
-
-==================================================
-📊 Discovery Summary
-==================================================
-Leagues:      OddsPapi=5
-Teams:        OddsPapi=234
-Fixtures:     OddsPapi=28, Polymarket=15
-Mappings:     12 created (8 high confidence)
-
-✅ Discovery complete!
-```
-
-Options:
-- `--days N` — look ahead N days (default: 7)
-- `--dry-run` — don't write to database
-- `--verbose` / `-v` — enable debug logging
-
-### Live — watch live matches
+Run the full suite from the repo root:
 
 ```bash
-cd services
-python -m cli live
+python -m pytest
 ```
-### Live TUI — stationary live view (read-only)
+
+If your local Python environment injects unrelated global pytest plugins, use:
 
 ```bash
-cd services
-python -m cli live --interval 5 --edge-threshold 0.03
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest
 ```
 
-Notes:
-- Uses `clobTokenIds` from Gamma as the CLOB `token_id` (cross-compatible).
-- Requires `DATABASE_URL` and `ODDS_API_KEY` to show sharps vs Poly odds.
-- Shows **market type** (match winner vs game winner) when available.
+## Environment notes
 
-Options:
-- `--interval N` — poll interval in seconds (default: 5)
-- `--edge-threshold N` — net edge threshold for alerts (default: 0.03)
-- `--spread-factor N` — spread penalty multiplier (default: 1.0)
-- `--min-confidence N` — minimum mapping confidence (default: 0.7)
-- `--lookahead-minutes N` — how far ahead to show matches (default: 30)
-- `--verbose` / `-v` — enable debug logging
+The tracked template is `.env.example`. Local secrets should stay in ignored env files such as:
 
-### Status — check system state
+- `.env`
+- `.env.local`
+- `.env.dev`
 
-```bash
-cd services
-python -m cli status
-```
+Default secret-path settings now point at:
 
-### API — operational endpoints
+- `~/.sleeperservice/keys/polymarket.key.age`
+- `~/.sleeperservice/keys/STOP_TRADING`
 
-Start the API:
-```bash
-cd services
-uvicorn api.main:app --host 0.0.0.0 --port 8000
-```
+## Docker
 
-Endpoints:
-```bash
-# Health check
-curl http://localhost:8000/health
+Compose currently provides:
 
-# System status
-curl http://localhost:8000/ops/status
+- `postgres`
+- `migrate`
+- `api`
 
-# Live matches + gaps
-curl http://localhost:8000/ops/live
-```
+The stale worker service was removed during Phase 0 cleanup.
 
-## Database Schema (6 tables)
+## Status
 
-| Table | Purpose |
-|-------|---------|
-| `leagues` | League/tournament metadata |
-| `teams` | Team/participant cache |
-| `fixtures` | Upcoming/live matches |
-| `mappings` | OddsPapi ↔ Polymarket links |
-| `odds_snapshots` | Live price time series |
-| `shadow_orders` | Paper trade decisions |
-
-## Configuration
-
-Environment variables:
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `DATABASE_URL` | Postgres connection string | required |
-| `ODDS_API_KEY` | OddsPapi API key | optional |
-| `POLY_API_KEY` | Polymarket API key | optional |
-| `TARGET_LEAGUES` | Comma-separated league names | `LCK,LPL,LEC,LCS,LTA,LCP,CBLOL` |
-| `SHADOW_GAP_THRESHOLD` | Gap threshold for shadow orders | `0.05` |
-| `MONITOR_POLL_INTERVAL_SECONDS` | Monitor poll interval | `5` |
-
-## Troubleshooting
-
-### "No live matches found"
-Run discovery first: `python -m cli discover --days 7`
-
-### "No Pinnacle odds available"
-The match may not have active odds yet. Wait for closer to match start.
-
-### Database connection errors
-Ensure Postgres is running: `docker compose -f infra/docker-compose.yml ps`
-
-### OddsPapi rate limits
-The client respects cooldowns (500ms-2000ms per endpoint). If you hit limits, increase cooldown settings.
-
-## Development
-
-### Run tests
-```bash
-cd services
-pytest tests/
-```
-
-### Run with Docker Compose (full stack)
-```bash
-docker compose -f infra/docker-compose.yml up --build
-```
-
-## What's NOT included (MVP scope)
-
-- No UI
-- No actual order execution (shadow orders only)
-- No broad market discovery (only LoL top 6 leagues)
-- No continuous background polling
+The codebase still contains MVP-era modules and docs, but the package/import model is now standardized on `services.*`. Continue Phase 0 work from `docs/platform/implementation-roadmap.md`.

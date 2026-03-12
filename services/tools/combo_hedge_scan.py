@@ -6,8 +6,8 @@ For each match where CS implied > PM moneyline ask, pull:
   - Game 1, Game 2, Game 3 (and G4/G5 for BO5) market prices
   - Compute all series paths and hedge P&L
 
-Usage (from services/):
-    python -m tools.combo_hedge_scan
+Usage (from repo root):
+    python -m services.tools.combo_hedge_scan
 """
 
 import json

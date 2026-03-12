@@ -1,4 +1,4 @@
-from shared.db import get_db_session
+from services.shared.db import get_db_session
 
 
 def get_db():

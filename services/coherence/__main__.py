@@ -1,8 +1,7 @@
 """Run coherence CLI as a module."""
 
-from coherence.cli import main
+from services.coherence.cli import main
 
 
 if __name__ == "__main__":
     main()
-

@@ -1,18 +1,15 @@
 #!/usr/bin/env python3
 """
 One-off: fetch OddsPapi odds for a LoL fixture and dump Pinnacle market structure.
-Usage: from repo root with conda env poly:
-  cd services && python -m tools.oddspapi_inspect_odds [fixture_id]
-  cd services && python -m tools.oddspapi_inspect_odds   # find GiantX vs Heretics live
+Usage: from repo root with conda env sleeperservice:
+  python -m services.tools.oddspapi_inspect_odds [fixture_id]
+  python -m services.tools.oddspapi_inspect_odds   # find GiantX vs Heretics live
 """
 import json
-import sys
 from datetime import datetime, timedelta, timezone
 
-# Run from services/
-sys.path.insert(0, ".")
-from shared.config import settings
-from shared.oddspapi_client import OddsPapiClient
+from services.shared.config import settings
+from services.shared.oddspapi_client import OddsPapiClient
 
 
 def _find_giantx_heretics(client: OddsPapiClient) -> str | None:
@@ -122,7 +119,7 @@ def main() -> None:
     payload = client.get_odds(fixture_id, bookmakers="pinnacle", verbosity=3)
     _dump_pinnacle_markets(payload)
     # Also run extract logic to see candidates
-    from shared.oddspapi_client import OddsPapiClient as O
+    from services.shared.oddspapi_client import OddsPapiClient as O
     bo = (payload.get("bookmakerOdds") or {}).get("pinnacle") or {}
     markets = bo.get("markets") or {}
     candidates = []

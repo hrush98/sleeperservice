@@ -15,7 +15,7 @@ from typing import Any
 import websockets
 from websockets.exceptions import ConnectionClosed, ConnectionClosedError, ConnectionClosedOK
 
-from shared.config import settings
+from services.shared.config import settings
 
 logger = logging.getLogger(__name__)
 

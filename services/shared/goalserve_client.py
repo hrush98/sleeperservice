@@ -12,7 +12,7 @@ from typing import Any
 
 import httpx
 
-from shared.config import settings
+from services.shared.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,8 @@ class GoalserveClient:
         feed_key: str | None = None,
         timeout_seconds: float = 30.0,
     ) -> None:
-        self._feed_key = (feed_key or settings.goalserve_feed_key).strip()
+        configured_feed_key = feed_key if feed_key is not None else settings.goalserve_feed_key
+        self._feed_key = (configured_feed_key or "").strip()
         self._timeout_seconds = timeout_seconds
         self._client = httpx.Client(timeout=timeout_seconds, follow_redirects=True)
 

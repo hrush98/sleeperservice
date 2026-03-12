@@ -4,9 +4,9 @@ from __future__ import annotations
 import json
 import sys
 
-from shared.config import settings
-from shared.secret_utils import decrypt_age_keyfile
-from shared.clob_executor import ClobExecutor
+from services.shared.clob_executor import ClobExecutor
+from services.shared.config import settings
+from services.shared.secret_utils import decrypt_age_keyfile
 
 
 def main() -> int:

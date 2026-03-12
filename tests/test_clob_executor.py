@@ -1,11 +1,10 @@
 import pytest
 
-# pylint: disable=import-error
 from py_clob_client.order_builder.builder import OrderBuilder, ROUNDING_CONFIG
 from py_clob_client.order_builder.constants import BUY, SELL
 from py_clob_client.signer import Signer
 
-from shared.clob_executor import (
+from services.shared.clob_executor import (
     ClobExecutor,
     _parse_balance_allowance,
     _quantize_buy_size_for_usdc_cents,

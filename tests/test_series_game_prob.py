@@ -1,6 +1,6 @@
 import pytest
 
-from shared.edge import series_prob_to_game_prob
+from services.shared.edge import series_prob_to_game_prob
 
 
 def _bo3_series_prob(game_prob: float) -> float:

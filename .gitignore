@@ -5,6 +5,7 @@ __pycache__/
 # Environment files
 .env
 .env.*
+!.env.example
 
 # Cursor / editor tooling
 .cursor/
@@ -18,6 +19,7 @@ __pycache__/
 .venv/
 venv/
 env/
+*.egg-info/
 
 # Migrations bytecode
 migrations/**/__pycache__/

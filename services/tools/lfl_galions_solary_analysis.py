@@ -27,7 +27,7 @@ def fair_bo3(p: float) -> float:
 def main() -> None:
     # ── GoalServe: Pinnacle for Galions vs Solary ─────────────────────────
     if not CACHE.exists():
-        print("No GoalServe cache. Run: python -m tools.gs_cache")
+        print("No GoalServe cache. Run: python -m services.tools.gs_cache")
         return
 
     data = json.loads(CACHE.read_text())

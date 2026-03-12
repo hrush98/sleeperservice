@@ -1,5 +1,7 @@
-from cli.gold_edge import _duration_to_seconds, _evaluate_entry_decision, _parse_rules
-from shared.goalserve_client import parse_game_stats
+import pytest
+
+from services.cli.gold_edge import _duration_to_seconds, _evaluate_entry_decision, _parse_rules
+from services.shared.goalserve_client import GoalserveClient, parse_game_stats
 
 
 def test_parse_game_stats_extracts_gold_diff() -> None:
@@ -44,13 +46,22 @@ def test_duration_to_seconds_parses_hh_mm_ss() -> None:
 
 def test_parse_rules_uses_config_format(monkeypatch) -> None:
     monkeypatch.setattr(
-        "cli.gold_edge.settings.gold_edge_rules",
+        "services.cli.gold_edge.settings.gold_edge_rules",
         "12,4000,0.70,0;18,5000,0.88,1",
     )
     rules = _parse_rules()
     assert len(rules) == 2
     assert rules[0].minute_min == 12
     assert rules[1].requires_baron is True
+
+
+def test_goalserve_client_requires_feed_key() -> None:
+    client = GoalserveClient(feed_key="")
+    try:
+        with pytest.raises(RuntimeError, match="GOALSERVE_FEED_KEY is required"):
+            client.get_home()
+    finally:
+        client.close()
 
 
 def test_entry_decision_requires_edge_and_rule() -> None:

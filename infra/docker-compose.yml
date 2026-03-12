@@ -41,17 +41,5 @@ services:
       migrate:
         condition: service_completed_successfully
 
-  worker:
-    build:
-      context: ..
-      dockerfile: services/worker/Dockerfile
-    environment:
-      DATABASE_URL: postgresql+psycopg2://polymarket:polymarket@postgres:5432/polymarket
-      POLYMARKET_BASE_URL: https://gamma-api.polymarket.com
-      WORKER_POLL_INTERVAL_SECONDS: 300
-    depends_on:
-      migrate:
-        condition: service_completed_successfully
-
 volumes:
   pgdata:

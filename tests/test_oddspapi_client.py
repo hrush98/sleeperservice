@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 
-from shared.oddspapi_client import OddsPapiClient
-from cli.discover import _parse_datetime
+from services.cli.discover import _parse_datetime
+from services.shared.oddspapi_client import OddsPapiClient
 
 
 def _path_style_moneyline_payload() -> dict:

@@ -15,8 +15,8 @@ from pydantic import BaseModel
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from api.dependencies import get_db
-from shared.models import Fixture, League, Mapping, OddsSnapshot, Position, ShadowOrder, Team, TradeEvent
+from services.api.dependencies import get_db
+from services.shared.models import Fixture, League, Mapping, OddsSnapshot, Position, ShadowOrder, Team, TradeEvent
 
 router = APIRouter(prefix="/ops", tags=["Operations"])
 

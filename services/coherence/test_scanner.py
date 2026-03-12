@@ -1,5 +1,5 @@
-from coherence.models import FamilyType, StrategyType
-from coherence.scanner import (
+from services.coherence.models import FamilyType, StrategyType
+from services.coherence.scanner import (
     _filter_candidate_events,
     assign_families,
     route_strategy_candidates,
@@ -237,4 +237,3 @@ def test_assign_families_decomposes_mixed_event() -> None:
     assert len(assignments) == 2
     assert {item.family for item in assignments} == {FamilyType.BY_CASCADE, FamilyType.ON_PARTITION}
     assert all(item.parent_event_id == "mixed1" for item in assignments)
-

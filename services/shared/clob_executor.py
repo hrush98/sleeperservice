@@ -37,7 +37,7 @@ except Exception as exc:  # pragma: no cover - handled at runtime
     SELL = None
     _IMPORT_ERROR = exc
 
-from shared.config import settings
+from services.shared.config import settings
 
 
 @dataclass

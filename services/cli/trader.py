@@ -17,9 +17,10 @@ from uuid import UUID, uuid4
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 
-from shared.config import settings
-from shared.db import SessionLocal
-from shared.edge import (
+from services.shared.clob_executor import CancelSubmission, ClobExecutor, OrderSubmission
+from services.shared.config import settings
+from services.shared.db import SessionLocal
+from services.shared.edge import (
     NetEdgeResult,
     check_hard_stop,
     check_thesis_death,
@@ -27,11 +28,10 @@ from shared.edge import (
     compute_entry_edge,
     compute_exit_signal,
 )
-from shared.fixture_state import FixtureStateManager, TriggerEvent
-from shared.models import Fixture, Mapping, OrderAttempt, Position, TradeEvent
-from shared.polymarket_user_ws import PolymarketUserWSManager
-from shared.polymarket_ws import BookState, PolymarketWSManager
-from shared.clob_executor import CancelSubmission, ClobExecutor, OrderSubmission
+from services.shared.fixture_state import FixtureStateManager, TriggerEvent
+from services.shared.models import Fixture, Mapping, OrderAttempt, Position, TradeEvent
+from services.shared.polymarket_user_ws import PolymarketUserWSManager
+from services.shared.polymarket_ws import BookState, PolymarketWSManager
 
 from .monitor_types import FocusSnapshot, LogBuffer, PaperTrade, TriggerRecord, format_market_label
 from .poller import SingleMatchPoller

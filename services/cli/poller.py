@@ -16,17 +16,17 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from threading import Lock
 
-from shared.config import settings
-from shared.edge import (
+from services.shared.config import settings
+from services.shared.edge import (
     NetEdgeResult,
     compute_net_edges,
     devig_two_way_decimal,
     series_prob_to_game_prob,
 )
-from shared.models import Fixture, Mapping
-from shared.oddspapi_client import AsyncOddsPapiClient, OddsPapiClient
-from shared.polymarket_client import AsyncPolymarketClient
-from shared.polymarket_ws import BookState, PolymarketWSManager
+from services.shared.models import Fixture, Mapping
+from services.shared.oddspapi_client import AsyncOddsPapiClient, OddsPapiClient
+from services.shared.polymarket_client import AsyncPolymarketClient
+from services.shared.polymarket_ws import BookState, PolymarketWSManager
 
 from .monitor_types import FocusSnapshot, LogBuffer, PerfStats
 

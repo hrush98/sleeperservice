@@ -2,7 +2,7 @@
 
 from types import SimpleNamespace
 
-from cli.discover import (
+from services.cli.discover import (
     _anchor_from_goalserve,
     _build_market_side_map,
     _classify_polymarket_market,

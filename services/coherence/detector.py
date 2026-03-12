@@ -8,8 +8,8 @@ from datetime import date, datetime
 from difflib import SequenceMatcher
 from typing import Any
 
-from coherence.models import CandidateEvent, DateCascade, MarketInfo
-from shared.config import settings
+from services.coherence.models import CandidateEvent, DateCascade, MarketInfo
+from services.shared.config import settings
 
 logger = logging.getLogger(__name__)
 _semantic_model: Any | None = None
@@ -210,4 +210,3 @@ def _get_semantic_model() -> Any | None:
         _semantic_model_failed = True
         logger.warning("Semantic fallback unavailable (%s): %s", settings.coherence_semantic_model_name, exc)
         return None
-

@@ -22,7 +22,7 @@ import threading
 
 import httpx
 
-from shared.config import settings
+from services.shared.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -716,4 +716,3 @@ def get_client() -> PolymarketClient:
     if _client is None:
         _client = PolymarketClient()
     return _client
-

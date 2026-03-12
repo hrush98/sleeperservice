@@ -28,7 +28,7 @@ from sqlalchemy import DateTime, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from shared.db import Base
+from services.shared.db import Base
 
 
 class League(Base):

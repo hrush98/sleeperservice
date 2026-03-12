@@ -2,8 +2,8 @@
 CLI entry point for LoL Lead-Lag Arbitrage Bot.
 
 Usage:
-    python -m cli discover --days 7
-    python -m cli live
+    python -m services.cli discover --days 7
+    python -m services.cli live
 """
 
 # pylint: disable=not-callable
@@ -12,11 +12,11 @@ import logging
 
 import typer
 
-from cli.analyze import analyze_command
-from cli.discover import discover_command
-from cli.gold_edge import analyze_command as analyze_gold_edge_command
-from cli.gold_edge import cache_daily_command, collect_live_command, probe_command
-from cli.live import live_command
+from services.cli.analyze import analyze_command
+from services.cli.discover import discover_command
+from services.cli.gold_edge import analyze_command as analyze_gold_edge_command
+from services.cli.gold_edge import cache_daily_command, collect_live_command, probe_command
+from services.cli.live import live_command
 
 # Configure logging
 logging.basicConfig(
@@ -118,8 +118,17 @@ def status():
     """Show current system status (counts, last discovery, etc.)."""
     from sqlalchemy import func, select
 
-    from shared.db import SessionLocal
-    from shared.models import Fixture, League, Mapping, OddsSnapshot, Position, ShadowOrder, Team, TradeEvent
+    from services.shared.db import SessionLocal
+    from services.shared.models import (
+        Fixture,
+        League,
+        Mapping,
+        OddsSnapshot,
+        Position,
+        ShadowOrder,
+        Team,
+        TradeEvent,
+    )
 
     with SessionLocal() as db:
         leagues_op = db.execute(
@@ -290,4 +299,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-

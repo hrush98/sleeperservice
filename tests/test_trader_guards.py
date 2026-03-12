@@ -1,11 +1,10 @@
 from datetime import datetime, timedelta, timezone
 
-# pylint: disable=import-error
-from cli.monitor_types import FocusSnapshot
-from cli.trader import _build_entry_candidate, _is_market_endgame, _orientation_entry_block_reason
-from shared.config import settings
-from shared.edge import NetEdgeResult
-from shared.polymarket_ws import BookState
+from services.cli.monitor_types import FocusSnapshot
+from services.cli.trader import _build_entry_candidate, _is_market_endgame, _orientation_entry_block_reason
+from services.shared.config import settings
+from services.shared.edge import NetEdgeResult
+from services.shared.polymarket_ws import BookState
 
 
 def _snapshot(*, bid_a: float | None, ask_a: float | None, bid_b: float | None, ask_b: float | None) -> FocusSnapshot:

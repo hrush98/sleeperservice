@@ -13,10 +13,10 @@ from typing import Any
 import typer
 from sentence_transformers import SentenceTransformer
 
-from coherence.detector import parse_market_date
-from coherence.models import CandidateEvent, MarketInfo
-from coherence.scanner import scan_market_catalog
-from shared.config import settings
+from services.coherence.detector import parse_market_date
+from services.coherence.models import CandidateEvent, MarketInfo
+from services.coherence.scanner import scan_market_catalog
+from services.shared.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -454,4 +454,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

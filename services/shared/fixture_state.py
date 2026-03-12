@@ -8,7 +8,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from shared.config import settings
+from services.shared.config import settings
 
 
 @dataclass
@@ -250,4 +250,3 @@ def _delta(new: float | None, old: float | None) -> float | None:
 def _ewma(previous: float, value: float) -> float:
     alpha = TriggerConfig.EWMA_ALPHA
     return (alpha * value) + ((1 - alpha) * previous)
-

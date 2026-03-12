@@ -25,15 +25,15 @@ from rich.live import Live
 from sqlalchemy import select as sa_select
 from sqlalchemy.orm import aliased
 
-from shared.config import settings
-from shared.secret_utils import decrypt_age_keyfile
-from shared.db import SessionLocal
-from shared.fixture_state import FixtureStateManager
-from shared.models import Fixture, Mapping, Position
-from shared.oddspapi_client import AsyncOddsPapiClient
-from shared.polymarket_client import AsyncPolymarketClient
-from shared.polymarket_user_ws import PolymarketUserWSManager
-from shared.polymarket_ws import PolymarketWSManager
+from services.shared.config import settings
+from services.shared.db import SessionLocal
+from services.shared.fixture_state import FixtureStateManager
+from services.shared.models import Fixture, Mapping, Position
+from services.shared.oddspapi_client import AsyncOddsPapiClient
+from services.shared.polymarket_client import AsyncPolymarketClient
+from services.shared.polymarket_user_ws import PolymarketUserWSManager
+from services.shared.polymarket_ws import PolymarketWSManager
+from services.shared.secret_utils import decrypt_age_keyfile
 
 from .live_tui import apply_strategy_mode_to_layout, build_layout, render_layout
 from .monitor_types import LogBuffer, LogBufferHandler

@@ -1,7 +1,6 @@
-"""Entry point for running CLI as module: python -m cli"""
+"""Entry point for running CLI as module: python -m services.cli"""
 
-from cli.main import main
+from services.cli.main import main
 
 if __name__ == "__main__":
     main()
-

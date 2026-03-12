@@ -12,8 +12,8 @@ from threading import Lock
 
 from rich.text import Text
 
-from shared.edge import NetEdgeResult
-from shared.fixture_state import TriggerEvent
+from services.shared.edge import NetEdgeResult
+from services.shared.fixture_state import TriggerEvent
 
 logger = logging.getLogger("cli.live")
 

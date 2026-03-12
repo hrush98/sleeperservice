@@ -3,8 +3,8 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 # pylint: disable=import-error
-from cli.monitor_types import LogBuffer, PaperTrade
-from cli.trader import (
+from services.cli.monitor_types import LogBuffer, PaperTrade
+from services.cli.trader import (
     _classify_exit_timeout_balance_outcome,
     TradeManager,
     _compute_degraded_exit_shares,
@@ -14,7 +14,7 @@ from cli.trader import (
     _next_balance_zero_poll_count,
     _seed_balance_reconcile_last_ts,
 )
-from shared.config import settings
+from services.shared.config import settings
 
 
 def test_order_not_found_timeout() -> None:
@@ -364,8 +364,8 @@ def test_phantom_retry_entry_blocked_too_early() -> None:
     assert result is False
 
 
-@patch("cli.trader.TradeManager._next_attempt_seq", return_value=2)
-@patch("cli.trader.TradeManager._cancel_existing_order")
+@patch("services.cli.trader.TradeManager._next_attempt_seq", return_value=2)
+@patch("services.cli.trader.TradeManager._cancel_existing_order")
 def test_phantom_retry_entry_succeeds(mock_cancel, _mock_seq) -> None:
     executor = MagicMock()
     submit_resp = MagicMock()

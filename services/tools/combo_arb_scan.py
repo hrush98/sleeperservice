@@ -2,8 +2,8 @@
 Combinatorial Arb Validation Scan
 Compare sportsbook correct-score implied series probabilities vs Polymarket moneyline.
 
-Usage (from services/):
-    python -m tools.combo_arb_scan
+Usage (from repo root):
+    python -m services.tools.combo_arb_scan
 
 Uses cached GoalServe data (run gs_cache.py first if no cache).
 """
@@ -66,7 +66,7 @@ class PMMoneyline:
 def load_goalserve() -> list[CorrectScoreMatch]:
     """Load cached GoalServe odds and extract LoL correct score matches."""
     if not CACHE_FILE.exists():
-        logger.error("No GoalServe cache. Run: python -m tools.gs_cache")
+        logger.error("No GoalServe cache. Run: python -m services.tools.gs_cache")
         sys.exit(1)
 
     data = json.loads(CACHE_FILE.read_text())

@@ -3,26 +3,19 @@ from __future__ import annotations
 import argparse
 import json
 import math
-import sys
 import time
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_DOWN
-from pathlib import Path
 
 from sqlalchemy import or_, select
 
-ROOT = Path(__file__).resolve().parents[1]
-SERVICES_PATH = ROOT / "services"
-if str(SERVICES_PATH) not in sys.path:
-    sys.path.insert(0, str(SERVICES_PATH))
+from py_clob_client.clob_types import MarketOrderArgs, OrderType
 
-from shared.clob_executor import ClobExecutor  # noqa: E402
-from shared.config import settings  # noqa: E402
-from shared.db import SessionLocal  # noqa: E402
-from shared.models import Fixture  # noqa: E402
-from shared.secret_utils import decrypt_age_keyfile  # noqa: E402
-
-from py_clob_client.clob_types import MarketOrderArgs, OrderType  # noqa: E402
+from services.shared.clob_executor import ClobExecutor
+from services.shared.config import settings
+from services.shared.db import SessionLocal
+from services.shared.models import Fixture
+from services.shared.secret_utils import decrypt_age_keyfile
 
 DEFAULT_TEAM_A = "Solary"
 DEFAULT_TEAM_B = "BK Rog"

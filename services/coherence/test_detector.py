@@ -1,5 +1,5 @@
-from coherence.detector import detect_date_cascades, parse_market_date
-from coherence.models import CandidateEvent, MarketInfo
+from services.coherence.detector import detect_date_cascades, parse_market_date
+from services.coherence.models import CandidateEvent, MarketInfo
 
 
 def _mk_market(question: str, end_date: str, description: str = "same rule") -> MarketInfo:
@@ -37,7 +37,7 @@ def test_parse_market_date_falls_back_to_end_date() -> None:
 
 
 def test_detect_date_cascades_filters_stem_mismatch(monkeypatch) -> None:
-    monkeypatch.setattr("coherence.detector.settings.coherence_semantic_fallback_enabled", False)
+    monkeypatch.setattr("services.coherence.detector.settings.coherence_semantic_fallback_enabled", False)
     candidate = CandidateEvent(
         event_id="e1",
         event_slug="s1",
@@ -69,7 +69,7 @@ def test_detect_date_cascades_sorts_by_date() -> None:
 
 
 def test_detect_date_cascades_semantic_fallback_allows_mismatch(monkeypatch) -> None:
-    monkeypatch.setattr("coherence.detector._semantic_series_match", lambda _markets: True)
+    monkeypatch.setattr("services.coherence.detector._semantic_series_match", lambda _markets: True)
     candidate = CandidateEvent(
         event_id="e1",
         event_slug="s1",
@@ -83,4 +83,3 @@ def test_detect_date_cascades_semantic_fallback_allows_mismatch(monkeypatch) -> 
     assert len(cascades) == 1
     assert diagnostics["semantic_fallback_used"] == 1
     assert diagnostics["stem_mismatch"] == 0
-

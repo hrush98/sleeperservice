@@ -2,9 +2,9 @@
 """
 One-off: Lock orientation for the Fnatic vs Team Vitality mapping so MATCH (ML) odds align.
 
-Usage (from repo root, conda env poly):
-  cd services && PYTHONPATH=. python -m tools.fix_orientation_fnatic_vitality
-  cd services && PYTHONPATH=. python -m tools.fix_orientation_fnatic_vitality --flip
+Usage (from repo root, conda env sleeperservice):
+  python -m services.tools.fix_orientation_fnatic_vitality
+  python -m services.tools.fix_orientation_fnatic_vitality --flip
 
 Finds the mapping for a match with Fnatic and Team Vitality, sets orientation_locked=True
 and team_a_is_home so odds line up. Run once; if the display is still wrong, run with --flip.
@@ -16,8 +16,8 @@ import sys
 
 from sqlalchemy import select
 
-from shared.db import SessionLocal
-from shared.models import Fixture, Mapping
+from services.shared.db import SessionLocal
+from services.shared.models import Fixture, Mapping
 
 
 def _has_fnatic_vitality(team_a: str | None, team_b: str | None) -> bool:

@@ -1,9 +1,9 @@
 from datetime import datetime, timezone
 
-from cli.complement_arb import _simulate_fok_fill
-from cli.monitor_types import ComplementArbState
-from shared.edge import compute_complement_edge, compute_vwap
-from shared.polymarket_ws import BookState
+from services.cli.complement_arb import _simulate_fok_fill
+from services.cli.monitor_types import ComplementArbState
+from services.shared.edge import compute_complement_edge, compute_vwap
+from services.shared.polymarket_ws import BookState
 
 
 def test_compute_vwap_returns_partial_fillable_size() -> None:

@@ -16,13 +16,13 @@ from uuid import uuid4
 from sqlalchemy import and_, select
 from sqlalchemy.dialects.postgresql import insert
 
-from shared.clob_executor import ClobExecutor
-from shared.config import settings
-from shared.db import SessionLocal
-from shared.goalserve_client import GoalserveClient, parse_game_stats
-from shared.models import Fixture, GameResult, GameSnapshot, GoldEdgeTrade
-from shared.polymarket_client import PolymarketClient
-from shared.secret_utils import decrypt_age_keyfile
+from services.shared.clob_executor import ClobExecutor
+from services.shared.config import settings
+from services.shared.db import SessionLocal
+from services.shared.goalserve_client import GoalserveClient, parse_game_stats
+from services.shared.models import Fixture, GameResult, GameSnapshot, GoldEdgeTrade
+from services.shared.polymarket_client import PolymarketClient
+from services.shared.secret_utils import decrypt_age_keyfile
 
 logger = logging.getLogger(__name__)
 

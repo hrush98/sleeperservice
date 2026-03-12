@@ -15,7 +15,7 @@ from typing import Any
 import websockets
 from websockets.exceptions import ConnectionClosed, ConnectionClosedOK, ConnectionClosedError
 
-from shared.config import settings
+from services.shared.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -358,4 +358,3 @@ def _safe_float(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
-

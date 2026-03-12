@@ -7,15 +7,15 @@ from typing import Any
 
 import typer
 
-from coherence.checks import (
+from services.coherence.checks import (
     find_complement_findings,
     find_implication_findings,
     find_monotonicity_violations,
     find_partition_sum_findings,
 )
-from coherence.detector import detect_date_cascades
-from coherence.ranker import rank_violations_with_orderbook
-from coherence.scanner import (
+from services.coherence.detector import detect_date_cascades
+from services.coherence.ranker import rank_violations_with_orderbook
+from services.coherence.scanner import (
     assign_families,
     decomposition_stats,
     family_counts,
@@ -24,8 +24,8 @@ from coherence.scanner import (
     strategy_counts,
     write_catalog_cache,
 )
-from coherence.models import CandidateEvent, FamilyType, PairStatus, PartitionStatus
-from shared.config import settings
+from services.coherence.models import CandidateEvent, FamilyType, PairStatus, PartitionStatus
+from services.shared.config import settings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -268,4 +268,3 @@ def _parse_sizes(raw: str) -> list[float]:
 def main() -> None:
     """Module CLI entrypoint."""
     app()
-

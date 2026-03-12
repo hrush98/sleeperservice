@@ -1,25 +1,32 @@
-"""
-Configuration settings for the LoL Lead-Lag Arbitrage Bot.
-"""
+"""Configuration settings for SleeperService runtimes."""
 
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
-def _find_env_file() -> Path | None:
-    """Find .env file in current dir or parent dirs."""
-    current = Path.cwd()
-    for path in [current, current.parent, current / "services", Path(__file__).parent.parent]:
-        env_path = path / ".env"
-        if env_path.exists():
-            return env_path
-    return None
+def _find_env_files() -> tuple[str, ...] | None:
+    """Return env files to load in precedence order."""
+    env_names = (".env", ".env.local", ".env.dev")
+    current_root = Path.cwd().resolve()
+    repo_root = Path(__file__).resolve().parents[2]
+    search_roots = (current_root,) if current_root == repo_root else (current_root, repo_root)
+
+    candidates: list[str] = []
+    seen: set[Path] = set()
+    for root in search_roots:
+        for env_name in env_names:
+            env_path = (root / env_name).resolve()
+            if not env_path.exists() or env_path in seen:
+                continue
+            seen.add(env_path)
+            candidates.append(str(env_path))
+    return tuple(candidates) or None
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
-        env_file=_find_env_file(),
+        env_file=_find_env_files(),
         env_file_encoding="utf-8",
         extra="ignore",
     )
@@ -39,14 +46,14 @@ class Settings(BaseSettings):
     polymarket_ws_url: str = "wss://ws-subscriptions-clob.polymarket.com"
     poly_api_key: str | None = None
     polymarket_game_bets_tag_id: int = 100639  # Game bets tag for LoL
-    polymarket_keyfile_path: str = "~/.sleeprservice/keys/polymarket.key.age"
+    polymarket_keyfile_path: str = "~/.sleeperservice/keys/polymarket.key.age"
     polymarket_chain_id: int = 137
     polymarket_signature_type: int = 0  # EOA
     polymarket_funder_address: str | None = None  # Set for proxy wallets (Polymarket displayed address)
     polymarket_token_decimals: int = 6
 
     # Goalserve esports
-    goalserve_feed_key: str = "1a6c8e6dd6394e4e4f4308de6650ad6a"
+    goalserve_feed_key: str | None = None
     goalserve_base_url: str = "https://www.goalserve.com/getfeed"
     goalserve_poll_seconds: float = 30.0
     goalserve_probe_seconds: float = 30.0
@@ -168,7 +175,7 @@ class Settings(BaseSettings):
     live_min_seconds_between_orders: float = 3.0
     live_share_step: float = 0.0001
     min_book_depth_usd: float = 250.0  # Skip entry when bid-side USD depth is below this
-    live_kill_switch_path: str = "~/.sleeprservice/keys/STOP_TRADING"
+    live_kill_switch_path: str = "~/.sleeperservice/keys/STOP_TRADING"
     live_require_allowance_check: bool = True
     # Stop-loss guards
     stop_thesis_death_enabled: bool = True   # exit when p_ref < entry_price

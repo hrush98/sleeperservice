@@ -17,12 +17,12 @@ from sqlalchemy import select
 from sqlalchemy.dialects.postgresql import insert
 from zoneinfo import ZoneInfo
 
-from shared.config import settings
-from shared.db import SessionLocal
-from shared.goalserve_client import GoalserveClient
-from shared.models import Fixture, League, Mapping, Team
-from shared.oddspapi_client import OddsPapiClient
-from shared.polymarket_client import PolymarketClient
+from services.shared.config import settings
+from services.shared.db import SessionLocal
+from services.shared.goalserve_client import GoalserveClient
+from services.shared.models import Fixture, League, Mapping, Team
+from services.shared.oddspapi_client import OddsPapiClient
+from services.shared.polymarket_client import PolymarketClient
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +87,10 @@ def normalize_name(name: str) -> str:
     return " ".join(tokens)
 
 
-def is_target_league(name: str, patterns: list[str]) -> bool:
+def is_target_league(name: str, patterns: list[str] | None = None) -> bool:
     """Check if a league name matches our target leagues."""
+    if patterns is None:
+        patterns = ALL_TARGET_LEAGUE_PATTERNS
     normalized = normalize_name(name)
     return any(pattern in normalized for pattern in patterns)
 
@@ -1559,4 +1561,3 @@ def _apply_orientation_anchor(details_enriched: dict, orientation_anchor: dict) 
     )
     details_enriched["orientation_anchor_reason"] = orientation_anchor.get("orientation_anchor_reason")
     details_enriched["orientation_anchor_ts"] = orientation_anchor.get("orientation_anchor_ts")
-
