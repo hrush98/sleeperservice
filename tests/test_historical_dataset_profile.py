@@ -45,6 +45,7 @@ def test_discover_dataset_files_guesses_venues_and_skips_hidden_paths(tmp_path):
     (dataset_root / ".hidden").mkdir(parents=True)
 
     (dataset_root / "polymarket" / "trades.parquet").write_text("a", encoding="utf-8")
+    (dataset_root / "polymarket" / "._trades.parquet").write_text("sidecar", encoding="utf-8")
     (dataset_root / "kalshi" / "markets.csv").write_text("b", encoding="utf-8")
     (dataset_root / ".hidden" / "ignored.parquet").write_text("c", encoding="utf-8")
 
@@ -78,12 +79,16 @@ def test_profile_dataset_writes_manifest_and_summary_without_duckdb(tmp_path):
 
     assert manifest["inventory"]["total_files"] == 2
     assert manifest["inventory"]["venues"] == {"kalshi": 1, "polymarket": 1}
+    assert manifest["file_record_strategy"] == "full"
+    assert len(manifest["parquet_collections"]) == 1
     assert manifest["capabilities"]["duckdb_available"] is True
     assert manifest["capabilities"]["parquet_audit_performed"] is True
     assert any("parquet profiling failed" in warning.lower() for warning in manifest["warnings"])
-    assert manifest["parquet_audit"]["files"][0]["error"]
+    assert manifest["parquet_audit"]["collection_count"] == 1
+    assert manifest["parquet_audit"]["collections"][0]["error"]
     assert "Historical Dataset Profile" in summary
     assert "Parquet audit performed: True" in summary
+    assert "Parquet collections discovered: 1" in summary
 
 
 def test_profile_historical_dataset_help_does_not_require_database_url(monkeypatch, capsys):

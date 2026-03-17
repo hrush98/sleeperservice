@@ -7,11 +7,18 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from services.research.settings import HistoricalResearchSettings
 
 KNOWN_VENUES = ("polymarket", "kalshi")
+FILE_KIND_HINTS: dict[str, tuple[str, ...]] = {
+    "legacy_trades": ("legacy_trades",),
+    "blocks": ("blocks",),
+    "trades": ("trade", "trades", "fills", "executions"),
+    "markets": ("market", "markets", "contract", "contracts", "metadata"),
+    "resolutions": ("resolution", "resolutions", "resolved", "outcome", "outcomes"),
+}
 TIMESTAMP_NAME_HINTS = (
     "time",
     "timestamp",
@@ -22,6 +29,7 @@ TIMESTAMP_NAME_HINTS = (
     "resolution",
     "closed",
     "open",
+    "end",
 )
 RESOLUTION_FIELD_HINTS = (
     "resolution",
@@ -38,7 +46,10 @@ METADATA_FIELD_HINTS = (
     "question",
     "title",
     "condition_id",
-    "venue",
+    "ticker",
+    "event_ticker",
+    "clob_token_ids",
+    "market_maker_address",
 )
 DUPLICATE_KEY_CANDIDATES = (
     ("trade_id",),
@@ -48,6 +59,9 @@ DUPLICATE_KEY_CANDIDATES = (
     ("transaction_hash", "trade_index"),
     ("market_id", "timestamp", "price", "size"),
 )
+MAX_MANIFEST_FILE_RECORDS = 200
+DEEP_AUDIT_ROW_LIMIT = 50_000_000
+DEEP_AUDIT_SAMPLE_FILE_LIMIT = 12
 
 
 @dataclass(frozen=True)
@@ -71,10 +85,48 @@ class DiscoveredDatasetFile:
 
 
 @dataclass(frozen=True)
+class DatasetCollection:
+    collection_id: str
+    guessed_venue: str
+    kind: str
+    relative_dir: str
+    absolute_dir: str
+    parquet_glob: str
+    can_use_glob: bool
+    file_count: int
+    total_size_bytes: int
+    absolute_paths: tuple[str, ...]
+    sample_relative_paths: tuple[str, ...]
+    sample_absolute_paths: tuple[str, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "collection_id": self.collection_id,
+            "guessed_venue": self.guessed_venue,
+            "kind": self.kind,
+            "relative_dir": self.relative_dir,
+            "absolute_dir": self.absolute_dir,
+            "parquet_glob": self.parquet_glob,
+            "can_use_glob": self.can_use_glob,
+            "file_count": self.file_count,
+            "total_size_bytes": self.total_size_bytes,
+            "sample_relative_paths": list(self.sample_relative_paths),
+        }
+
+
+@dataclass(frozen=True)
 class DatasetProfileArtifacts:
     manifest_path: Path
     summary_path: Path
     manifest: dict[str, Any]
+
+
+def classify_dataset_file_kind(relative_path: str) -> str:
+    normalized = relative_path.lower()
+    for kind, hints in FILE_KIND_HINTS.items():
+        if any(hint in normalized for hint in hints):
+            return kind
+    return "all"
 
 
 def discover_dataset_files(
@@ -88,7 +140,10 @@ def discover_dataset_files(
     for file_path in sorted(dataset_root.rglob("*")):
         if not file_path.is_file():
             continue
+
         relative_path = file_path.relative_to(dataset_root)
+        if file_path.name.startswith("._"):
+            continue
         if not include_hidden and any(part.startswith(".") for part in relative_path.parts):
             continue
 
@@ -107,6 +162,46 @@ def discover_dataset_files(
             break
 
     return discovered
+
+
+def build_dataset_collections(
+    parquet_files: Iterable[DiscoveredDatasetFile],
+) -> list[DatasetCollection]:
+    grouped: dict[tuple[str, str, str], list[DiscoveredDatasetFile]] = {}
+    directory_totals: Counter[str] = Counter()
+    for parquet_file in parquet_files:
+        relative_dir = Path(parquet_file.relative_path).parent.as_posix()
+        absolute_dir = str(Path(parquet_file.absolute_path).resolve().parent)
+        key = (
+            parquet_file.guessed_venue,
+            classify_dataset_file_kind(parquet_file.relative_path),
+            relative_dir,
+        )
+        grouped.setdefault(key, []).append(parquet_file)
+        directory_totals[absolute_dir] += 1
+
+    collections: list[DatasetCollection] = []
+    for (venue, kind, relative_dir), records in sorted(grouped.items()):
+        sorted_records = sorted(records, key=lambda record: record.relative_path)
+        sample_records = _sample_records(sorted_records, DEEP_AUDIT_SAMPLE_FILE_LIMIT)
+        absolute_dir = str(Path(sorted_records[0].absolute_path).resolve().parent)
+        collections.append(
+            DatasetCollection(
+                collection_id=_build_collection_id(venue, kind, relative_dir),
+                guessed_venue=venue,
+                kind=kind,
+                relative_dir=relative_dir,
+                absolute_dir=absolute_dir,
+                parquet_glob=str(Path(absolute_dir) / "[!._]*.parquet"),
+                can_use_glob=len(sorted_records) == directory_totals[absolute_dir],
+                file_count=len(sorted_records),
+                total_size_bytes=sum(record.size_bytes for record in sorted_records),
+                absolute_paths=tuple(record.absolute_path for record in sorted_records),
+                sample_relative_paths=tuple(record.relative_path for record in sample_records),
+                sample_absolute_paths=tuple(record.absolute_path for record in sample_records),
+            )
+        )
+    return collections
 
 
 def profile_dataset(
@@ -136,6 +231,8 @@ def profile_dataset(
 
     inventory = _build_inventory(files)
     parquet_files = [record for record in files if record.extension == ".parquet"]
+    parquet_collections = build_dataset_collections(parquet_files)
+    manifest_file_records, file_record_strategy = _serialize_manifest_files(files)
 
     parquet_capabilities = {
         "duckdb_available": False,
@@ -143,15 +240,20 @@ def profile_dataset(
     }
     parquet_audit: dict[str, Any] = {
         "file_count": len(parquet_files),
+        "collection_count": len(parquet_collections),
         "warnings": [],
-        "files": [],
+        "collections": [],
     }
 
-    if parquet_files:
-        parquet_audit, parquet_capabilities = _profile_parquet_files(parquet_files)
+    if parquet_collections:
+        parquet_audit, parquet_capabilities = _profile_parquet_collections(parquet_collections)
         warnings.extend(parquet_audit["warnings"])
+    elif parquet_files:
+        warnings.append("Parquet files were discovered, but no logical parquet collections could be formed.")
     else:
-        warnings.append("No parquet files were discovered. Dataset landing can continue, but parquet-specific profiling was skipped.")
+        warnings.append(
+            "No parquet files were discovered. Dataset landing can continue, but parquet-specific profiling was skipped."
+        )
 
     manifest = {
         "generated_at": generated_at.isoformat(),
@@ -161,7 +263,9 @@ def profile_dataset(
         "inventory": inventory,
         "capabilities": parquet_capabilities,
         "warnings": _unique_preserving_order(warnings),
-        "files": [record.to_dict() for record in files],
+        "file_record_strategy": file_record_strategy,
+        "files": manifest_file_records,
+        "parquet_collections": [collection.to_dict() for collection in parquet_collections],
         "parquet_audit": parquet_audit,
     }
 
@@ -199,19 +303,33 @@ def _build_inventory(files: list[DiscoveredDatasetFile]) -> dict[str, Any]:
     }
 
 
-def _profile_parquet_files(
-    parquet_files: list[DiscoveredDatasetFile],
+def _serialize_manifest_files(
+    files: list[DiscoveredDatasetFile],
+) -> tuple[list[dict[str, Any]], str]:
+    if len(files) <= MAX_MANIFEST_FILE_RECORDS:
+        return ([record.to_dict() for record in files], "full")
+
+    sample_records = _sample_records(files, MAX_MANIFEST_FILE_RECORDS)
+    return (
+        [record.to_dict() for record in sample_records],
+        f"sampled:{MAX_MANIFEST_FILE_RECORDS}",
+    )
+
+
+def _profile_parquet_collections(
+    collections: list[DatasetCollection],
 ) -> tuple[dict[str, Any], dict[str, bool]]:
     try:
         import duckdb
     except ImportError:
         return (
             {
-                "file_count": len(parquet_files),
+                "file_count": sum(collection.file_count for collection in collections),
+                "collection_count": len(collections),
                 "warnings": [
-                    "duckdb is not installed in the current environment, so row counts, schema details, null rates, timestamp sanity checks, resolution coverage, and duplicate-risk checks were skipped."
+                    "duckdb is not installed in the current environment, so parquet schema, row-count, null-rate, timestamp, resolution-coverage, and duplicate-risk checks were skipped."
                 ],
-                "files": [],
+                "collections": [],
             },
             {
                 "duckdb_available": False,
@@ -221,15 +339,25 @@ def _profile_parquet_files(
 
     connection = duckdb.connect(database=":memory:")
     try:
-        file_reports: list[dict[str, Any]] = []
+        collection_reports: list[dict[str, Any]] = []
         warnings: list[str] = []
-        for parquet_file in parquet_files:
+        for collection in collections:
             try:
-                file_report, file_warnings = _profile_single_parquet_file(connection, parquet_file)
+                collection_report, collection_warnings = _profile_single_collection(
+                    connection,
+                    collection,
+                )
             except Exception as exc:  # pragma: no cover - exercised via focused tests
-                file_report = {
-                    "relative_path": parquet_file.relative_path,
+                collection_report = {
+                    "collection_id": collection.collection_id,
+                    "relative_dir": collection.relative_dir,
+                    "venue": collection.guessed_venue,
+                    "kind": collection.kind,
+                    "file_count": collection.file_count,
+                    "sampled_file_count": len(collection.sample_absolute_paths),
+                    "audit_scope": "error",
                     "row_count": None,
+                    "audited_row_count": None,
                     "column_count": None,
                     "columns": [],
                     "top_null_columns": [],
@@ -245,20 +373,22 @@ def _profile_parquet_files(
                         "missing_fields": list(METADATA_FIELD_HINTS),
                     },
                     "error": str(exc),
+                    "sample_relative_paths": list(collection.sample_relative_paths),
                 }
-                file_warnings = [
-                    f"{parquet_file.relative_path}: parquet profiling failed: {exc}"
+                collection_warnings = [
+                    f"{collection.relative_dir}: parquet profiling failed: {exc}"
                 ]
-            file_reports.append(file_report)
-            warnings.extend(file_warnings)
+            collection_reports.append(collection_report)
+            warnings.extend(collection_warnings)
     finally:
         connection.close()
 
     return (
         {
-            "file_count": len(parquet_files),
+            "file_count": sum(collection.file_count for collection in collections),
+            "collection_count": len(collections),
             "warnings": _unique_preserving_order(warnings),
-            "files": file_reports,
+            "collections": collection_reports,
         },
         {
             "duckdb_available": True,
@@ -267,8 +397,11 @@ def _profile_parquet_files(
     )
 
 
-def _profile_single_parquet_file(connection: Any, parquet_file: DiscoveredDatasetFile) -> tuple[dict[str, Any], list[str]]:
-    relation = f"read_parquet({_sql_string_literal(parquet_file.absolute_path)})"
+def _profile_single_collection(
+    connection: Any,
+    collection: DatasetCollection,
+) -> tuple[dict[str, Any], list[str]]:
+    relation = _read_parquet_collection_sql(collection)
     warnings: list[str] = []
 
     schema_rows = connection.execute(f"DESCRIBE SELECT * FROM {relation}").fetchall()
@@ -282,27 +415,41 @@ def _profile_single_parquet_file(connection: Any, parquet_file: DiscoveredDatase
     ]
     row_count = int(connection.execute(f"SELECT COUNT(*) FROM {relation}").fetchone()[0])
 
-    null_counts = _compute_null_counts(connection, relation, columns, row_count)
-    timestamp_checks = _compute_timestamp_checks(connection, relation, columns)
-    duplicate_check = _compute_duplicate_check(connection, relation, columns)
-    resolution_coverage = _compute_non_null_rates(columns, null_counts, row_count, RESOLUTION_FIELD_HINTS)
+    audit_relation = relation
+    audit_scope = "full"
+    audited_row_count = row_count
+    sampled_file_count = collection.file_count
+
+    if row_count > DEEP_AUDIT_ROW_LIMIT and len(collection.sample_absolute_paths) < collection.file_count:
+        audit_relation = _read_parquet_files_sql(collection.sample_absolute_paths)
+        audit_scope = "sample"
+        audited_row_count = int(connection.execute(f"SELECT COUNT(*) FROM {audit_relation}").fetchone()[0])
+        sampled_file_count = len(collection.sample_absolute_paths)
+        warnings.append(
+            f"{collection.relative_dir}: deep parquet checks used {sampled_file_count} sampled files because the collection has {row_count} rows."
+        )
+
+    null_counts = _compute_null_counts(connection, audit_relation, columns, audited_row_count)
+    timestamp_checks = _compute_timestamp_checks(connection, audit_relation, columns)
+    duplicate_check = _compute_duplicate_check(connection, audit_relation, columns)
+    resolution_coverage = _compute_non_null_rates(columns, null_counts, audited_row_count, RESOLUTION_FIELD_HINTS)
     metadata_quality = _compute_metadata_quality(columns)
 
     if duplicate_check["status"] == "skipped":
         warnings.append(
-            f"{parquet_file.relative_path}: duplicate-risk check skipped because no known key columns were present."
+            f"{collection.relative_dir}: duplicate-risk check skipped because no known key columns were present."
         )
     if not timestamp_checks:
         warnings.append(
-            f"{parquet_file.relative_path}: no timestamp-like columns were detected for timestamp sanity checks."
+            f"{collection.relative_dir}: no timestamp-like columns were detected for timestamp sanity checks."
         )
     if not resolution_coverage:
         warnings.append(
-            f"{parquet_file.relative_path}: no resolution-like columns were detected for resolution coverage checks."
+            f"{collection.relative_dir}: no resolution-like columns were detected for resolution coverage checks."
         )
     if metadata_quality["missing_fields"]:
         warnings.append(
-            f"{parquet_file.relative_path}: metadata fields missing: {', '.join(metadata_quality['missing_fields'])}."
+            f"{collection.relative_dir}: metadata fields missing: {', '.join(metadata_quality['missing_fields'])}."
         )
 
     top_null_columns = sorted(
@@ -310,7 +457,7 @@ def _profile_single_parquet_file(connection: Any, parquet_file: DiscoveredDatase
             {
                 "name": column["name"],
                 "null_count": null_counts[column["name"]],
-                "null_rate": _safe_rate(null_counts[column["name"]], row_count),
+                "null_rate": _safe_rate(null_counts[column["name"]], audited_row_count),
             }
             for column in columns
         ),
@@ -320,8 +467,16 @@ def _profile_single_parquet_file(connection: Any, parquet_file: DiscoveredDatase
 
     return (
         {
-            "relative_path": parquet_file.relative_path,
+            "collection_id": collection.collection_id,
+            "relative_dir": collection.relative_dir,
+            "parquet_glob": collection.parquet_glob,
+            "venue": collection.guessed_venue,
+            "kind": collection.kind,
+            "file_count": collection.file_count,
+            "sampled_file_count": sampled_file_count,
+            "audit_scope": audit_scope,
             "row_count": row_count,
+            "audited_row_count": audited_row_count,
             "column_count": len(columns),
             "columns": columns,
             "top_null_columns": top_null_columns,
@@ -329,6 +484,7 @@ def _profile_single_parquet_file(connection: Any, parquet_file: DiscoveredDatase
             "resolution_coverage": resolution_coverage,
             "duplicate_check": duplicate_check,
             "metadata_quality": metadata_quality,
+            "sample_relative_paths": list(collection.sample_relative_paths),
         },
         warnings,
     )
@@ -373,8 +529,8 @@ def _compute_timestamp_checks(
     expressions: list[str] = []
     for index, column in enumerate(timestamp_columns):
         identifier = _quote_identifier(column["name"])
-        expressions.append(f"MIN({identifier}) AS min_ts_{index}")
-        expressions.append(f"MAX({identifier}) AS max_ts_{index}")
+        expressions.append(f"CAST(MIN({identifier}) AS VARCHAR) AS min_ts_{index}")
+        expressions.append(f"CAST(MAX({identifier}) AS VARCHAR) AS max_ts_{index}")
     row = connection.execute(f"SELECT {', '.join(expressions)} FROM {relation}").fetchone()
 
     checks = []
@@ -495,6 +651,8 @@ def _render_summary(manifest: dict[str, Any]) -> str:
         f"- Output root: `{manifest['output_root']}`",
         f"- Files discovered: {inventory['total_files']}",
         f"- Total size (bytes): {inventory['total_size_bytes']}",
+        f"- File records stored in manifest: {len(manifest['files'])} ({manifest['file_record_strategy']})",
+        f"- Parquet collections discovered: {len(manifest['parquet_collections'])}",
         f"- DuckDB parquet audit available: {capabilities['duckdb_available']}",
         f"- Parquet audit performed: {capabilities['parquet_audit_performed']}",
         "",
@@ -518,52 +676,98 @@ def _render_summary(manifest: dict[str, Any]) -> str:
             "## Parquet Audit",
             "",
             f"- Parquet files discovered: {parquet_audit['file_count']}",
+            f"- Parquet collections discovered: {parquet_audit['collection_count']}",
         ]
     )
 
-    if not parquet_audit["files"]:
-        lines.append("- No parquet file details were produced in this run.")
+    if not parquet_audit["collections"]:
+        lines.append("- No parquet collection details were produced in this run.")
         return "\n".join(lines) + "\n"
 
-    for file_report in parquet_audit["files"]:
+    for collection_report in parquet_audit["collections"]:
         lines.extend(
             [
                 "",
-                f"### `{file_report['relative_path']}`",
-                f"- Rows: {file_report['row_count']}",
-                f"- Columns: {file_report['column_count']}",
-                f"- Duplicate check: {_format_duplicate_check(file_report['duplicate_check'])}",
-                f"- Metadata fields present: {', '.join(file_report['metadata_quality']['present_fields']) or 'none'}",
-                f"- Metadata fields missing: {', '.join(file_report['metadata_quality']['missing_fields']) or 'none'}",
+                f"### `{collection_report['relative_dir']}`",
+                f"- Venue/kind: {collection_report['venue']}/{collection_report['kind']}",
+                f"- Files: {collection_report['file_count']}",
+                f"- Rows: {collection_report['row_count']}",
+                f"- Deep-audit scope: {collection_report['audit_scope']} ({collection_report['sampled_file_count']} files, {collection_report['audited_row_count']} rows)",
+                f"- Columns: {collection_report['column_count']}",
+                f"- Duplicate check: {_format_duplicate_check(collection_report['duplicate_check'])}",
+                f"- Metadata fields present: {', '.join(collection_report['metadata_quality']['present_fields']) or 'none'}",
+                f"- Metadata fields missing: {', '.join(collection_report['metadata_quality']['missing_fields']) or 'none'}",
             ]
         )
 
-        if file_report["timestamp_checks"]:
+        if collection_report["timestamp_checks"]:
             timestamp_summary = "; ".join(
                 f"{item['column']} [{item['min']} -> {item['max']}]"
-                for item in file_report["timestamp_checks"]
+                for item in collection_report["timestamp_checks"]
             )
             lines.append(f"- Timestamp checks: {timestamp_summary}")
         else:
             lines.append("- Timestamp checks: none")
 
-        if file_report["resolution_coverage"]:
+        if collection_report["resolution_coverage"]:
             resolution_summary = "; ".join(
                 f"{item['column']}={item['non_null_rate']:.4f}"
-                for item in file_report["resolution_coverage"]
+                for item in collection_report["resolution_coverage"]
             )
             lines.append(f"- Resolution coverage: {resolution_summary}")
         else:
             lines.append("- Resolution coverage: none")
 
-        if file_report["top_null_columns"]:
+        if collection_report["top_null_columns"]:
             top_nulls = ", ".join(
                 f"{item['name']}={item['null_rate']:.4f}"
-                for item in file_report["top_null_columns"][:5]
+                for item in collection_report["top_null_columns"][:5]
             )
             lines.append(f"- Highest null-rate columns: {top_nulls}")
 
+        if collection_report["sample_relative_paths"]:
+            lines.append(
+                "- Sample files: "
+                + ", ".join(collection_report["sample_relative_paths"][:5])
+            )
+
     return "\n".join(lines) + "\n"
+
+
+def _build_collection_id(venue: str, kind: str, relative_dir: str) -> str:
+    raw_value = f"{venue}_{kind}_{relative_dir or 'root'}"
+    return "".join(character if character.isalnum() else "_" for character in raw_value).strip("_").lower()
+
+
+def _sample_records(records: list[DiscoveredDatasetFile], limit: int) -> list[DiscoveredDatasetFile]:
+    if limit <= 0 or not records:
+        return []
+    if len(records) <= limit:
+        return list(records)
+    if limit == 1:
+        return [records[0]]
+
+    max_index = len(records) - 1
+    indexes = {
+        round(position * max_index / (limit - 1))
+        for position in range(limit)
+    }
+    return [records[index] for index in sorted(indexes)]
+
+
+def _read_parquet_glob_sql(glob_path: str) -> str:
+    return f"read_parquet({_sql_string_literal(glob_path)}, union_by_name=true)"
+
+
+def _read_parquet_files_sql(paths: Iterable[str]) -> str:
+    quoted_paths = ", ".join(_sql_string_literal(path) for path in paths)
+    return f"read_parquet([{quoted_paths}], union_by_name=true)"
+
+
+def _read_parquet_collection_sql(collection: DatasetCollection) -> str:
+    if collection.can_use_glob:
+        return _read_parquet_glob_sql(collection.parquet_glob)
+    return _read_parquet_files_sql(collection.absolute_paths)
 
 
 def _format_counter(counter: dict[str, int]) -> str:

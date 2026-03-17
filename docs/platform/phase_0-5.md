@@ -41,12 +41,12 @@ By the end of `Phase 0.5`, the repo should have:
 
 ## Immediate next slice
 
-`P0.5.1` now has a real profiler command and output contract.
-The next implementation slice should keep moving through `P0.5.2`:
+`P0.5.1` and `P0.5.2` now both have real Becker-dataset passes behind them.
+The next implementation slice should move into `P0.5.3`:
 
-1. lock the normalized research view contracts
-2. add the DuckDB-backed materialization entrypoint
-3. validate feature derivations with synthetic parquet fixtures before the first real dataset build
+1. add the historical study runner and output contracts
+2. produce the first saved calibration and expectancy studies from the normalized DuckDB layer
+3. decide which outputs are durable enough to promote into later replay, ranking, and risk hooks
 
 ## P0.5.1 Dataset landing and audit
 
@@ -134,6 +134,7 @@ Turn raw trades into stable analytical views that later platform code can depend
 
 - `conda run -n sleeperservice python -m services.tools.materialize_historical_research --help`
 - the normalized views materialize from the local dataset without manual SQL editing
+- on Becker-scale datasets, `--skip-view-row-counts` is available so the local build can finish without waiting on full final-view counts
 - feature-derivation tests pass in the `sleeperservice` environment
 
 ### Exit criteria

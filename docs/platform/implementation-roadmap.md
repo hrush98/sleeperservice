@@ -53,7 +53,7 @@ When the active phase has a dedicated `phase_*.md` guide:
 - active branch: `phase_0`
 - current focus: `Phase 0.5 - historical research foundation`
 - previous completed focus: `Phase 0 - repo stabilization`
-- next milestone: run the first `P0.5.1 Dataset landing and audit` profiler pass against the target dataset
+- next milestone: start `P0.5.3 Baseline empirical studies` from the normalized historical research layer
 
 ## Phase summary
 
@@ -243,31 +243,32 @@ Execution companion:
 ### Phase 0.5 task list
 
 #### P0.5.1 Dataset landing and audit
-- status: in progress
+- status: completed
 - completed:
   - defined the initial `HISTORICAL_DATASET_ROOT` and `HISTORICAL_RESEARCH_OUTPUT_ROOT` config surface
   - isolated historical-research path resolution in `services.research` so the profiler does not depend on live runtime config
   - added a read-only historical dataset profiler entrypoint under `services.tools`
   - added manifest and summary artifact output conventions under `logs/historical_research/`
   - added focused tests for dataset discovery, output contracts, and CLI help-path safety
-- remaining:
-  - run the profiler against the target dataset and capture the first real audit output
-  - deepen parquet-specific schema and quality checks once the analytical dependency path is installed in the environment
+  - landed the Becker prediction-markets dataset under an external local root and captured the first real audit output
+  - switched parquet audit from per-file brute force to logical collection profiling so the real dataset completes in one command
+  - added sampled deep-audit fallback for very large collections and bounded manifest file records for Becker-scale runs
 - target:
   - define dataset-path conventions
   - add a schema and venue profiler
   - document raw-dataset boundaries and quality checks
 
 #### P0.5.2 Normalized research layer
-- status: in progress
+- status: completed
 - completed:
   - added pure feature-derivation helpers for price, size, time-to-resolution, maker/taker role, and topic classification
   - added normalization contracts and alias resolution for market, trade, and resolution views
   - added `services.tools.materialize_historical_research` with a DuckDB-backed local materialization path
   - added focused synthetic-parquet tests for the materializer and normalized feature outputs
-- remaining:
-  - run the materializer against the target dataset and capture the first real schema-mapping gaps
-  - widen venue-specific column aliases once the real dataset pass exposes missing fields
+  - ran the materializer against the Becker dataset and captured the first real schema-mapping gaps
+  - added Becker-specific Kalshi and Polymarket normalization for ticker-based Kalshi contracts, Polymarket token-id joins, block-timestamp joins, and legacy FPMM trades
+  - added explicit `contract_side` support in normalized trade views so later studies can distinguish traded outcome from buy or sell action
+  - added `--skip-view-row-counts` so Becker-scale materialization can finish without blocking on full final-view counts
 - target:
   - create stable analytical views for historical markets, trades, resolutions, and trade features
   - separate venue-specific outputs from blended assumptions

@@ -86,6 +86,7 @@ python -m services.tools.profile_historical_dataset --help
 HISTORICAL_DATASET_ROOT=/absolute/path/to/prediction-markets-data python -m services.tools.profile_historical_dataset
 python -m services.tools.materialize_historical_research --help
 HISTORICAL_DATASET_ROOT=/absolute/path/to/prediction-markets-data python -m services.tools.materialize_historical_research
+HISTORICAL_DATASET_ROOT=/absolute/path/to/prediction-markets-data python -m services.tools.materialize_historical_research --skip-view-row-counts
 ```
 
 ## Testing
@@ -120,6 +121,7 @@ Phase 0.5 historical-research tooling uses:
 - `HISTORICAL_DATASET_ROOT` for the external parquet dataset root
 - `HISTORICAL_RESEARCH_OUTPUT_ROOT` for generated manifests and summaries
 - `duckdb` in the `sleeperservice` environment for normalized research materialization
+- `--skip-view-row-counts` on the materializer when the target dataset is large enough that final view counts are not practical to compute during the build
 
 ## Docker
 

@@ -71,6 +71,51 @@ def test_materialize_historical_research_builds_expected_views(tmp_path):
     ]
 
 
+def test_materialize_historical_research_supports_becker_style_dataset(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    output_root = tmp_path / "outputs"
+    _write_becker_like_dataset(dataset_root)
+
+    artifacts = materialize_historical_research(
+        HistoricalResearchSettings(
+            dataset_root=dataset_root,
+            output_root=output_root,
+        )
+    )
+
+    connection = duckdb.connect(str(artifacts.database_path))
+    try:
+        trade_features = connection.execute(
+            """
+            SELECT
+                venue,
+                trade_id,
+                market_id,
+                CAST(trade_timestamp AS VARCHAR),
+                ROUND(price_probability, 4),
+                ROUND(notional_usd, 4),
+                maker_taker_role,
+                taker_side,
+                contract_side,
+                resolved_outcome,
+                topic_class
+            FROM historical_trade_features
+            ORDER BY venue, trade_id
+            """
+        ).fetchall()
+    finally:
+        connection.close()
+
+    assert artifacts.metadata["view_row_counts"]["historical_trades"] == 3
+    assert artifacts.metadata["view_row_counts"]["historical_markets"] == 2
+    assert artifacts.metadata["view_row_counts"]["historical_trade_features"] == 3
+    assert trade_features == [
+        ("kalshi", "k_trade_1", "KXBTC-2025-100K", "2025-01-01 00:00:00", 0.65, 6.5, "taker", "buy", "yes", "yes", "crypto"),
+        ("polymarket", "0xctf:1", "pm_market_1", "2025-01-05 00:00:00", 0.62, 0.62, "taker", "sell", "YES", "YES", "politics"),
+        ("polymarket", "0xlegacy:2", "pm_market_1", "2025-01-04 00:00:00", 0.4, 0.4, "taker", "buy", "NO", "YES", "politics"),
+    ]
+
+
 def test_materialize_historical_research_help_does_not_require_database_url(monkeypatch, capsys):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.delenv("database_url", raising=False)
@@ -139,6 +184,108 @@ def _write_test_parquet_dataset(dataset_root: Path) -> None:
                 ) AS t(market_id, resolution_timestamp, resolved_outcome, resolution_value)
             )
             TO '{(kalshi_dir / "resolutions.parquet").as_posix()}'
+            (FORMAT parquet)
+            """
+        )
+    finally:
+        connection.close()
+
+
+def _write_becker_like_dataset(dataset_root: Path) -> None:
+    (dataset_root / "kalshi" / "markets").mkdir(parents=True, exist_ok=True)
+    (dataset_root / "kalshi" / "trades").mkdir(parents=True, exist_ok=True)
+    (dataset_root / "polymarket" / "markets").mkdir(parents=True, exist_ok=True)
+    (dataset_root / "polymarket" / "trades").mkdir(parents=True, exist_ok=True)
+    (dataset_root / "polymarket" / "legacy_trades").mkdir(parents=True, exist_ok=True)
+    (dataset_root / "polymarket" / "blocks").mkdir(parents=True, exist_ok=True)
+
+    connection = duckdb.connect(database=":memory:")
+    try:
+        connection.execute(
+            f"""
+            COPY (
+                SELECT * FROM (
+                    VALUES
+                        ('KXBTC-2025-100K', 'KXBTC-2025', 'Will BTC close above 100k?', 'finalized', 'yes', TIMESTAMP '2024-12-20 00:00:00', TIMESTAMP '2025-01-10 00:00:00')
+                ) AS t(ticker, event_ticker, title, status, result, created_time, close_time)
+            )
+            TO '{(dataset_root / "kalshi" / "markets" / "markets.parquet").as_posix()}'
+            (FORMAT parquet)
+            """
+        )
+        connection.execute(
+            f"""
+            COPY (
+                SELECT * FROM (
+                    VALUES
+                        ('k_trade_1', 'KXBTC-2025-100K', 10, 65, 35, 'yes', TIMESTAMP '2025-01-01 00:00:00')
+                ) AS t(trade_id, ticker, count, yes_price, no_price, taker_side, created_time)
+            )
+            TO '{(dataset_root / "kalshi" / "trades" / "trades.parquet").as_posix()}'
+            (FORMAT parquet)
+            """
+        )
+        connection.execute(
+            f"""
+            COPY (
+                SELECT * FROM (
+                    VALUES
+                        (
+                            'pm_market_1',
+                            'pm_condition_1',
+                            'Will the election be decided today?',
+                            'election-decided-today',
+                            '["YES","NO"]',
+                            '["1.0","0.0"]',
+                            '["1001","1002"]',
+                            1000.0,
+                            500.0,
+                            false,
+                            true,
+                            TIMESTAMP '2025-01-10 00:00:00',
+                            TIMESTAMP '2024-12-01 00:00:00',
+                            '0xfpmm'
+                        )
+                ) AS t(id, condition_id, question, slug, outcomes, outcome_prices, clob_token_ids, volume, liquidity, active, closed, end_date, created_at, market_maker_address)
+            )
+            TO '{(dataset_root / "polymarket" / "markets" / "markets.parquet").as_posix()}'
+            (FORMAT parquet)
+            """
+        )
+        connection.execute(
+            f"""
+            COPY (
+                SELECT * FROM (
+                    VALUES
+                        (10, '0xctf', 1, '0xorder', '0xmaker', '0xtaker', '0', '1001', 620000, 1000000, 0, NULL, TIMESTAMP '2025-01-05 00:00:01', 'ctf')
+                ) AS t(block_number, transaction_hash, log_index, order_hash, maker, taker, maker_asset_id, taker_asset_id, maker_amount, taker_amount, fee, timestamp, _fetched_at, _contract)
+            )
+            TO '{(dataset_root / "polymarket" / "trades" / "trades.parquet").as_posix()}'
+            (FORMAT parquet)
+            """
+        )
+        connection.execute(
+            f"""
+            COPY (
+                SELECT * FROM (
+                    VALUES
+                        (9, '0xlegacy', 2, '0xfpmm', '0xtrader', '400000', '0', 1, '1000000', true, NULL, TIMESTAMP '2025-01-04 00:00:01')
+                ) AS t(block_number, transaction_hash, log_index, fpmm_address, trader, amount, fee_amount, outcome_index, outcome_tokens, is_buy, timestamp, _fetched_at)
+            )
+            TO '{(dataset_root / "polymarket" / "legacy_trades" / "trades.parquet").as_posix()}'
+            (FORMAT parquet)
+            """
+        )
+        connection.execute(
+            f"""
+            COPY (
+                SELECT * FROM (
+                    VALUES
+                        (9, '2025-01-04T00:00:00Z'),
+                        (10, '2025-01-05T00:00:00Z')
+                ) AS t(block_number, timestamp)
+            )
+            TO '{(dataset_root / "polymarket" / "blocks" / "blocks.parquet").as_posix()}'
             (FORMAT parquet)
             """
         )

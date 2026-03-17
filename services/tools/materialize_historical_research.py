@@ -50,6 +50,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Emit artifact paths and row counts as JSON instead of a short text summary.",
     )
+    parser.add_argument(
+        "--skip-view-row-counts",
+        action="store_true",
+        help="Skip final row-count verification on the normalized views. Useful for very large datasets.",
+    )
     return parser
 
 
@@ -78,6 +83,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         database_path=database_path,
         include_hidden=args.include_hidden,
         max_files=args.max_files,
+        collect_view_row_counts=not args.skip_view_row_counts,
     )
 
     payload = {
@@ -93,7 +99,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"Metadata: {artifacts.metadata_path}")
         print(f"Summary: {artifacts.summary_path}")
         for view_name, row_count in artifacts.metadata["view_row_counts"].items():
-            print(f"{view_name}: {row_count}")
+            print(f"{view_name}: {row_count if row_count is not None else 'not collected'}")
 
     return 0
 
@@ -107,4 +113,3 @@ def _resolve_cli_path(path: Path) -> Path:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

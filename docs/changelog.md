@@ -20,6 +20,46 @@ flowchart TD
   poller -->|focus_only| ws[Polymarket_WS_subscriptions]
   trader -->|focus_only| trading[TradeSignals_and_CLOB_exec]
 
+## 2026-03-17 — Landed Becker dataset support for Phase 0.5
+
+### What changed
+- Reworked the historical dataset profiler from per-file parquet inspection to logical collection profiling so the real Becker dataset can be audited in one command.
+- Added sampled deep-audit behavior and bounded manifest file records for very large parquet collections.
+- Added Becker-specific Kalshi and Polymarket normalization paths, including Kalshi ticker-based contracts, Polymarket token-id market joins, block-timestamp joins, and legacy FPMM trade support.
+- Added `contract_side` to normalized trade views so later studies can distinguish the traded outcome from the taker buy or sell action.
+- Added `--skip-view-row-counts` to the materializer so Becker-scale builds can finish without blocking on full final-view counts.
+
+### Design decisions
+- Treat venue and directory collections as the profiling unit, not individual parquet files, because Becker-scale datasets make per-file audit the wrong abstraction.
+- Keep Becker-specific normalization explicit in SQL instead of trying to stretch generic alias guessing across materially different market microstructures.
+- Make final view row counts optional at materialization time rather than letting a successful large-dataset build appear hung on post-build verification queries.
+
+### Why
+The repo had tooling for `P0.5.1` and `P0.5.2`, but the first real Becker pass exposed that the original assumptions were too toy-sized for the actual dataset layout and volume.
+
+### Impact
+- The real Becker dataset now profiles successfully and produces durable manifest and summary artifacts under `logs/historical_research/`.
+- The normalized DuckDB build now succeeds against the real dataset when run with `--skip-view-row-counts`.
+- Phase 0.5 is no longer blocked on “get the target dataset working”; the next active implementation work can move into baseline empirical studies.
+
+### How to verify
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 conda run -n sleeperservice python -m pytest tests/test_historical_dataset_profile.py tests/test_historical_research_materialize.py -q` — passes the focused Phase 0.5 coverage, including Becker-shaped fixtures.
+- `conda run -n sleeperservice python -m services.tools.profile_historical_dataset --dataset-root /home/hmrush/prediction-market-analysis/data --json` — completes and writes a real Becker audit manifest plus summary.
+- `conda run -n sleeperservice python -m services.tools.materialize_historical_research --dataset-root /home/hmrush/prediction-market-analysis/data --skip-view-row-counts --json` — completes and writes the real DuckDB build plus metadata.
+- `git diff --check` — confirms the patch is whitespace-clean.
+
+```mermaid
+flowchart TD
+  parquet[Becker parquet collections] --> profiler[Collection profiler]
+  profiler --> manifest[dataset_profile_*.json]
+  profiler --> summary[dataset_profile_*.md]
+  parquet --> sourceViews[Venue and kind source views]
+  sourceViews --> normalize[Becker-aware normalization SQL]
+  normalize --> duckdb[historical_research.duckdb]
+  duckdb --> metadata[materialization_*.json]
+  duckdb --> studiesReady[Named research views ready for P0.5.3]
+```
+
 ## 2026-03-17 — Added Phase 0.5 normalized research materializer
 
 ### What changed
