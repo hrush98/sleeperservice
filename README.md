@@ -9,12 +9,14 @@ The repo is in the middle of the platform restructure documented in:
 - `docs/platform/engineering-improvements.md`
 
 Phase 0 is focused on making the repo repeatable to install, run, and test.
+The current active implementation phase is `Phase 0.5 - historical research foundation`.
 
 ## Current runtimes
 
 - `services.cli`: operational CLI for discovery, live monitoring, and strategy tools
 - `services.api`: FastAPI service for health and ops endpoints
 - `services.coherence`: market-family scanner for coherence analysis
+- `services.tools`: one-off utilities, including Phase 0.5 historical-research entrypoints
 
 ## Quick start
 
@@ -77,6 +79,15 @@ uvicorn services.api.main:app --host 0.0.0.0 --port 8000
 python -m services.coherence scan --cache-only
 ```
 
+### Historical research
+
+```bash
+python -m services.tools.profile_historical_dataset --help
+HISTORICAL_DATASET_ROOT=/absolute/path/to/prediction-markets-data python -m services.tools.profile_historical_dataset
+python -m services.tools.materialize_historical_research --help
+HISTORICAL_DATASET_ROOT=/absolute/path/to/prediction-markets-data python -m services.tools.materialize_historical_research
+```
+
 ## Testing
 
 Run the full suite from the repo root:
@@ -104,6 +115,12 @@ Default secret-path settings now point at:
 - `~/.sleeperservice/keys/polymarket.key.age`
 - `~/.sleeperservice/keys/STOP_TRADING`
 
+Phase 0.5 historical-research tooling uses:
+
+- `HISTORICAL_DATASET_ROOT` for the external parquet dataset root
+- `HISTORICAL_RESEARCH_OUTPUT_ROOT` for generated manifests and summaries
+- `duckdb` in the `sleeperservice` environment for normalized research materialization
+
 ## Docker
 
 Compose currently provides:
@@ -116,4 +133,4 @@ The stale worker service was removed during Phase 0 cleanup.
 
 ## Status
 
-The codebase still contains MVP-era modules and docs, but the package/import model is now standardized on `services.*`. Continue Phase 0 work from `docs/platform/implementation-roadmap.md`.
+The codebase still contains MVP-era modules and docs, but the package/import model is now standardized on `services.*`. Continue Phase 0.5 work from `docs/platform/implementation-roadmap.md`.

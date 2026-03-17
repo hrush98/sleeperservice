@@ -28,12 +28,17 @@ If implementation needs to change:
 - only update `target-architecture.md` if the end-state changes
 - only update `engineering-improvements.md` if the engineering standards or workstreams change
 
+When the active phase has a dedicated `phase_*.md` guide:
+- use that guide as the direct execution companion for task slicing and handoff
+- keep this roadmap as the source of status, sequencing, and open decisions
+
 ## Canonical workflow
 
 1. Use this file to determine the active phase.
 2. Use `target-architecture.md` to understand the intended system shape for that phase.
 3. Use `engineering-improvements.md` to ensure the work is being done cleanly.
-4. Update this file at the end of each meaningful session.
+4. If the active phase has a `phase_*.md` guide, use it as the direct implementation plan.
+5. Update this file at the end of each meaningful session.
 
 ## Current branch model
 
@@ -46,14 +51,14 @@ If implementation needs to change:
 
 ### Overall status
 - active branch: `phase_0`
-- current focus: `Phase 0 - repo stabilization`
-- parallel planning focus: `Phase 0.5 - historical research foundation`
-- next milestone: finish the current Phase 0 cleanup slice and decide when H0 dataset landing starts
+- current focus: `Phase 0.5 - historical research foundation`
+- previous completed focus: `Phase 0 - repo stabilization`
+- next milestone: run the first `P0.5.1 Dataset landing and audit` profiler pass against the target dataset
 
 ## Phase summary
 
 ### Phase 0 - Repo stabilization
-- status: active
+- status: complete
 - objective:
   - make the repo safe to work in repeatedly
   - remove known environmental and structural footguns
@@ -68,12 +73,15 @@ If implementation needs to change:
     - `P0 - immediate`
 
 ### Phase 0.5 - Historical research foundation
-- status: planned
+- status: active
 - objective:
   - create the historical-trades foundation for replay, calibration, and execution analytics
   - move research and empirical strategy validation earlier in the platform sequence
   - keep raw external data outside the live runtime and app database
 - primary references:
+  - `phase_0-5.md`
+    - `Immediate next slice`
+    - `P0.5.1-P0.5.4 implementation plan`
   - `historical-research-workstream.md`
     - `Workstream phases`
     - `Recommended implementation boundaries`
@@ -145,7 +153,7 @@ If implementation needs to change:
     - `Migration phases -> Phase 5`
   - `future-strategy-avenues.md`
 
-## Active phase detail
+## Detailed phase breakdown
 
 ## Phase 0 - Repo stabilization
 
@@ -182,39 +190,36 @@ If implementation needs to change:
   - make local and CI execution predictable
 
 #### P0.3 Dead worker and infra cleanup
-- status: partially complete
+- status: complete
 - completed:
   - removed the stale `worker` compose service that referenced a missing Dockerfile
   - updated in-repo runtime/tool command references to the canonical `services.*` module paths
-- remaining:
-  - align remaining top-level docs and instructions with the current runtime model
+  - aligned top-level runtime documentation and command references with the current `services.*` execution model
 - target:
   - remove stale worker references from docker/instructions
   - align compose and docs with the current runtime model
 
 #### P0.4 Config and secret cleanup
-- status: partially complete
+- status: complete
 - completed:
   - removed the hardcoded Goalserve feed key from tracked config defaults
   - added a tracked `.env.example` template and allowed it through `.gitignore`
   - fixed the default secret-path typo from `~/.sleeprservice/...` to `~/.sleeperservice/...`
   - tightened Goalserve client behavior so missing config fails explicitly
-- remaining:
-  - break the monolithic settings file into cleaner runtime/domain groupings later in Phase 0 or Phase 1
+  - documented the env and secret surface for the canonical install/run path
 - target:
   - remove hardcoded secrets from tracked config
   - separate config concerns more cleanly
   - document env requirements more clearly
 
 #### P0.5 Documentation reset
-- status: partially complete
+- status: complete
 - completed:
   - created `docs/platform/`
   - created `docs/research/reference-library.md`
   - rewrote `README.md` around the canonical Phase 0 package/install/run model
-- remaining:
-  - decide how and when to retire or relabel MVP-era top-level docs
-  - align additional legacy top-level docs with the new platform references
+  - introduced the mutable roadmap and Codex repo guidance
+  - added a changelog-backed planning trail for the restructure and Phase 0.5 transition
 
 ### Recommended execution order inside Phase 0
 
@@ -232,17 +237,37 @@ If implementation needs to change:
 - generate the first durable calibration and execution studies
 - keep this work isolated from live runtime coupling at first
 
+Execution companion:
+- `phase_0-5.md`
+
 ### Phase 0.5 task list
 
 #### P0.5.1 Dataset landing and audit
-- status: planned
+- status: in progress
+- completed:
+  - defined the initial `HISTORICAL_DATASET_ROOT` and `HISTORICAL_RESEARCH_OUTPUT_ROOT` config surface
+  - isolated historical-research path resolution in `services.research` so the profiler does not depend on live runtime config
+  - added a read-only historical dataset profiler entrypoint under `services.tools`
+  - added manifest and summary artifact output conventions under `logs/historical_research/`
+  - added focused tests for dataset discovery, output contracts, and CLI help-path safety
+- remaining:
+  - run the profiler against the target dataset and capture the first real audit output
+  - deepen parquet-specific schema and quality checks once the analytical dependency path is installed in the environment
 - target:
   - define dataset-path conventions
   - add a schema and venue profiler
   - document raw-dataset boundaries and quality checks
 
 #### P0.5.2 Normalized research layer
-- status: planned
+- status: in progress
+- completed:
+  - added pure feature-derivation helpers for price, size, time-to-resolution, maker/taker role, and topic classification
+  - added normalization contracts and alias resolution for market, trade, and resolution views
+  - added `services.tools.materialize_historical_research` with a DuckDB-backed local materialization path
+  - added focused synthetic-parquet tests for the materializer and normalized feature outputs
+- remaining:
+  - run the materializer against the target dataset and capture the first real schema-mapping gaps
+  - widen venue-specific column aliases once the real dataset pass exposes missing fields
 - target:
   - create stable analytical views for historical markets, trades, resolutions, and trade features
   - separate venue-specific outputs from blended assumptions
@@ -290,13 +315,13 @@ These are decisions that may change implementation order or exact structure.
   - convert them to pointers only after the restructure is well underway
 
 ### D3 - Scope of Phase 0
-- status: open
+- status: decided
 - question:
   - should Phase 0 stop at cleanup and reproducibility
   - or include the first extraction of shared modules if that proves necessary to stabilize imports
-- current bias:
-  - stay disciplined
-  - keep Phase 0 focused on stabilization, not architectural ambition
+- decision:
+  - Phase 0 remained focused on stabilization, packaging, environment reproducibility, config cleanup, and documentation reset
+  - deeper domain extraction remains a later phase concern
 
 ### D4 - Start timing for Phase 0.5
 - status: open
@@ -304,10 +329,23 @@ These are decisions that may change implementation order or exact structure.
   - should H0/H1 start only after all remaining Phase 0 cleanup lands
   - or can isolated historical-research work begin once the current package and command model is stable enough
 - current bias:
-  - finish the current Phase 0 slice
-  - then allow isolated H0/H1 work to begin before the rest of the deeper refactor sequence
+  - Phase 0 is now complete
+  - begin isolated H0/H1 work with read-only boundaries before the rest of the deeper refactor sequence
 
 ## Change log for this roadmap
+
+### 2026-03-17
+- implemented the first real `P0.5.1` code slice under `services.research` and `services.tools.profile_historical_dataset`
+- kept the research config surface separate from `services.shared.config` so dataset tooling stays outside live-runtime requirements
+- added focused tests for path resolution, dataset discovery, output writing, and CLI help behavior
+- documented the historical dataset env vars and command path in `README.md` and `.env.example`
+- added the first real `P0.5.2` slice with normalized view contracts, DuckDB materialization, and synthetic-parquet verification
+
+### 2026-03-12
+- added `phase_0-5.md` as the direct execution companion for the active phase
+- updated the roadmap workflow to allow active phases to carry dedicated `phase_*.md` implementation guides
+- linked the Phase 0.5 summary, detailed phase breakdown, and session handoff template to the new guide
+- started `P0.5.1` with the initial historical dataset config and profiler implementation slice
 
 ### 2026-03-11
 - created roadmap as the primary mutable execution document
@@ -325,6 +363,8 @@ These are decisions that may change implementation order or exact structure.
 - advanced P0.5 by rewriting `README.md` for the restructure-era execution model
 - introduced `Phase 0.5 - Historical research foundation` as an earlier research/replay workstream
 - added `historical-research-workstream.md` as the dedicated planning document for guide6-driven work
+- completed Phase 0 implementation and verification on the `sleeperservice` environment
+- moved the active roadmap focus from Phase 0 to Phase 0.5
 
 ## Session handoff template
 
@@ -337,6 +377,7 @@ Please check the active phase section, follow the listed execution order,
 and use docs/platform/target-architecture.md plus
 docs/platform/engineering-improvements.md as supporting references.
 If working on the historical-trades foundation, also use
-docs/platform/historical-research-workstream.md.
+docs/platform/historical-research-workstream.md and
+docs/platform/phase_0-5.md.
 Before making changes, update the roadmap status if needed.
 ```

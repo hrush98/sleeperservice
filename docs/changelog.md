@@ -20,6 +20,145 @@ flowchart TD
   poller -->|focus_only| ws[Polymarket_WS_subscriptions]
   trader -->|focus_only| trading[TradeSignals_and_CLOB_exec]
 
+## 2026-03-17 — Added Phase 0.5 normalized research materializer
+
+### What changed
+- Added pure historical-research feature derivation helpers for normalized price buckets, trade-size buckets, time-to-resolution buckets, maker/taker role normalization, and topic classification.
+- Added normalization contracts and alias-based SQL generation for `historical_markets`, `historical_trades`, `historical_resolutions`, `historical_trade_features`, and `historical_bucket_stats`.
+- Added `services.tools.materialize_historical_research` to build a local DuckDB database plus machine-readable and human-readable materialization outputs.
+- Added focused tests that build synthetic parquet fixtures and verify the normalized DuckDB views end to end.
+- Declared `duckdb==1.5.0` in `requirements.txt` and documented the new materialization command path in `README.md`.
+
+### Design decisions
+- Keep the normalized research layer DuckDB-backed and local to `logs/historical_research/` rather than introducing app-database coupling.
+- Start with alias-driven schema normalization so the first real dataset pass can reveal missing mappings instead of blocking all implementation until a perfect schema contract exists.
+- Preserve venue separation in the materialized views by carrying `venue` on every normalized record and grouping source files by venue before unioning.
+
+### Why
+`P0.5.2` needed a real build path so later calibration and execution studies can run from stable views instead of ad hoc queries or notebook-only transforms.
+
+### Impact
+- The repo now has a reproducible command to build normalized research views from parquet data.
+- Historical-research work can move from raw-file discovery into named view contracts and feature derivations.
+- The next blocker is no longer missing tooling; it is running the materializer against the real target dataset and tightening any alias gaps it exposes.
+
+### How to verify
+- `conda run -n sleeperservice python -m services.tools.materialize_historical_research --help` — confirms the new entrypoint and flags exist.
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 conda run -n sleeperservice python -m pytest tests/test_historical_research_materialize.py -q` — passes the focused normalized-layer tests.
+- `git diff --check` — confirms the patch is whitespace-clean.
+
+```mermaid
+flowchart TD
+  parquet[Dataset parquet files] --> sourceViews[Source DuckDB views by venue and file kind]
+  sourceViews --> markets[historical_markets]
+  sourceViews --> trades[historical_trades]
+  sourceViews --> resolutions[historical_resolutions]
+  markets --> features[historical_trade_features]
+  trades --> features
+  resolutions --> features
+  features --> buckets[historical_bucket_stats]
+```
+
+## 2026-03-17 — Added Phase 0.5 historical dataset profiler
+
+### What changed
+- Added a dedicated `services.research` package for historical-research settings and dataset profiling helpers.
+- Added `services.tools.profile_historical_dataset` as the first read-only `P0.5.1` entrypoint.
+- Added output contracts for machine-readable manifests and human-readable summaries under `logs/historical_research/`.
+- Added focused tests covering path resolution, dataset discovery, profiler output writing, and CLI help behavior.
+- Documented the new historical dataset env vars and command path in `README.md`, `.env.example`, and the roadmap.
+
+### Design decisions
+- Keep historical-research settings separate from `services.shared.config` so the profiler does not inherit the live runtime's database requirement.
+- Make parquet-specific schema and quality checks optional behind `duckdb` availability instead of pretending the dependency is already present.
+- Write local research artifacts under an ignored output root rather than into app Postgres or tracked repo paths.
+
+### Why
+Phase 0.5 needed an actual reproducible command surface for dataset landing and audit, not just planning docs that claimed it existed.
+
+### Impact
+- `python -m services.tools.profile_historical_dataset --help` now works without live-runtime env setup.
+- A configured dataset root now produces a manifest plus summary artifact layout for `P0.5.1`.
+- Full parquet-level profiling remains dependency-gated until `duckdb` is installed in the research environment.
+
+### How to verify
+- `conda run -n sleeperservice python -m services.tools.profile_historical_dataset --help` — shows the dataset/output CLI flags without requiring `DATABASE_URL`.
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 conda run -n sleeperservice python -m pytest tests/test_historical_dataset_profile.py -q` — passes the focused Phase 0.5 test file.
+- `git diff --check` — confirms the patch is whitespace-clean.
+
+```mermaid
+flowchart TD
+  cli[profile_historical_dataset.py] --> settings[services.research.settings]
+  settings --> profiler[services.research.dataset_profile]
+  profiler --> manifest[logs/historical_research/manifests]
+  profiler --> summary[logs/historical_research/summaries]
+```
+
+## 2026-03-12 — Added Phase 0.5 implementation guide
+
+### What changed
+- Added `docs/platform/phase_0-5.md` as the direct execution guide for the active historical-research phase.
+- Broke `Phase 0.5` into concrete `P0.5.1` through `P0.5.4` implementation slices with deliverables, verification targets, and exit criteria.
+- Updated `docs/platform/implementation-roadmap.md` so the roadmap references the new phase-guide workflow and includes `phase_0-5.md` in the session handoff path.
+
+### Design decisions
+- Keep `docs/platform/implementation-roadmap.md` as the source of truth for status, sequencing, and open decisions.
+- Use `phase_*.md` files only as execution companions, starting with `Phase 0.5`.
+- Keep the new guide implementation-focused without changing the target architecture or runtime boundaries.
+
+### Why
+The existing Phase 0.5 planning documents defined direction, but they did not yet give the repo a direct build checklist for the active phase. This guide closes that gap before implementation starts.
+
+### Impact
+- No runtime, schema, or config behavior changed from this documentation update alone.
+- Phase 0.5 work now has a single implementation reference for `P0.5.1` through `P0.5.4`.
+- Later active phases can follow the same guide pattern instead of pushing detailed execution notes into the roadmap itself.
+
+### How to verify
+- `sed -n '1,260p' docs/platform/phase_0-5.md` — confirm the guide exists with `P0.5.1` through `P0.5.4` sections.
+- `sed -n '1,360p' docs/platform/implementation-roadmap.md` — confirm `Phase 0.5` references `phase_0-5.md` and the session handoff template includes it.
+- `git diff --check` — confirm the docs patch is clean.
+
+```mermaid
+flowchart TD
+  roadmap[implementation-roadmap.md] --> phaseGuide[phase_0-5.md]
+  phaseGuide --> p051[P0.5.1 Dataset landing and audit]
+  phaseGuide --> p052[P0.5.2 Normalized research layer]
+  phaseGuide --> p053[P0.5.3 Baseline empirical studies]
+  phaseGuide --> p054[P0.5.4 Platform hooks]
+```
+
+## 2026-03-12 — Phase 0 completed and Phase 0.5 activated
+
+### What changed
+- Completed the Phase 0 packaging, import, infra, config, and documentation cleanup work.
+- Verified the refactor in the `sleeperservice` environment with the canonical test command.
+- Updated the roadmap to mark Phase 0 complete and Phase 0.5 as the active workstream.
+
+### Design decisions
+- Treat Phase 0 as finished once the repo is package-consistent, reproducible, and test-clean.
+- Keep the end-state architecture unchanged; only the execution status and next active phase changed here.
+- Use the `sleeperservice` environment and `python -m pytest` invocation as the current reliable verification path.
+
+### Why
+The repo is now stable enough to stop spending effort on the initial cleanup pass and move into the historical research foundation without carrying obvious packaging or environment debt forward.
+
+### Impact
+- Phase 0 is closed as an implementation milestone.
+- Phase 0.5 is now the active planning and execution focus.
+- Future changelog entries can treat historical research work as the next main branch of platform development.
+
+### How to verify
+- `sed -n '1,220p' docs/platform/implementation-roadmap.md` — confirm Phase 0 is marked complete and Phase 0.5 is active.
+- `PYTHONNOUSERSITE=1 conda run -n sleeperservice python -m pytest -q` — confirm the current Phase 0 baseline still passes.
+- `sed -n '1,140p' docs/changelog.md` — confirm this transition entry appears above the earlier Phase 0.5 planning entry.
+
+```mermaid
+flowchart TD
+  p0[Phase 0: complete] --> p05[Phase 0.5: active]
+  p05 --> h0[P0.5.1 Dataset landing and audit]
+```
+
 ## 2026-03-12 — Historical research foundation promoted to Phase 0.5
 
 ### What changed
