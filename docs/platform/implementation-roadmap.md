@@ -53,7 +53,7 @@ When the active phase has a dedicated `phase_*.md` guide:
 - active branch: `phase_0`
 - current focus: `Phase 0.5 - historical research foundation`
 - previous completed focus: `Phase 0 - repo stabilization`
-- next milestone: start `P0.5.3 Baseline empirical studies` from the normalized historical research layer
+- next milestone: extend `P0.5.3 Baseline empirical studies` from the first calibration and expectancy bundle into bias and sizing-prior outputs
 
 ## Phase summary
 
@@ -274,11 +274,17 @@ Execution companion:
   - separate venue-specific outputs from blended assumptions
 
 #### P0.5.3 Baseline empirical studies
-- status: planned
+- status: in progress
+- completed:
+  - added a dedicated `services.research.studies` package for durable empirical-study logic and shared artifact contracts
+  - added `services.tools.run_historical_studies` as the first baseline study runner over the normalized DuckDB layer
+  - implemented the first saved calibration surface study with machine-readable parquet output, metadata, and short summary artifacts
+  - implemented the first maker/taker expectancy study with both observed-role and inferred-counterparty role bases, plus explicit caveat metadata
+  - added focused synthetic end-to-end tests that verify study artifact contracts, venue filtering, and CLI help-path safety
 - target:
-  - produce calibration surfaces
-  - produce maker/taker expectancy summaries
-  - produce first empirical sizing and execution priors
+  - extend the bundle with longshot/favorite bias summaries
+  - extend the bundle with edge-dispersion and baseline sizing priors
+  - run and review the first Becker-scale outputs to decide what is promotable into later platform hooks
 
 #### P0.5.4 Platform hooks
 - status: planned

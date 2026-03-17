@@ -87,6 +87,9 @@ HISTORICAL_DATASET_ROOT=/absolute/path/to/prediction-markets-data python -m serv
 python -m services.tools.materialize_historical_research --help
 HISTORICAL_DATASET_ROOT=/absolute/path/to/prediction-markets-data python -m services.tools.materialize_historical_research
 HISTORICAL_DATASET_ROOT=/absolute/path/to/prediction-markets-data python -m services.tools.materialize_historical_research --skip-view-row-counts
+python -m services.tools.run_historical_studies --help
+python -m services.tools.run_historical_studies
+python -m services.tools.run_historical_studies --study calibration --venue polymarket
 ```
 
 ## Testing

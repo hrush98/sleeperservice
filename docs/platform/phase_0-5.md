@@ -41,12 +41,16 @@ By the end of `Phase 0.5`, the repo should have:
 
 ## Immediate next slice
 
-`P0.5.1` and `P0.5.2` now both have real Becker-dataset passes behind them.
-The next implementation slice should move into `P0.5.3`:
+`P0.5.3` has now started with:
+- a dedicated study package
+- the first baseline runner and artifact contract
+- saved calibration and maker/taker expectancy outputs
 
-1. add the historical study runner and output contracts
-2. produce the first saved calibration and expectancy studies from the normalized DuckDB layer
-3. decide which outputs are durable enough to promote into later replay, ranking, and risk hooks
+The next implementation slice inside `P0.5.3` should now:
+
+1. add longshot/favorite bias summaries
+2. add edge-dispersion and baseline sizing-prior outputs
+3. review the first Becker-scale results and decide which outputs are durable enough to promote into later replay, ranking, and risk hooks
 
 ## P0.5.1 Dataset landing and audit
 

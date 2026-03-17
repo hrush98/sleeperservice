@@ -20,6 +20,45 @@ flowchart TD
   poller -->|focus_only| ws[Polymarket_WS_subscriptions]
   trader -->|focus_only| trading[TradeSignals_and_CLOB_exec]
 
+## 2026-03-17 — Landed first P0.5.3 historical study bundle
+
+### What changed
+- Added `services.research.studies` with shared study contracts, source metadata capture, git/code identity capture, and bundle-level artifact writing.
+- Added `services.tools.run_historical_studies` as the first durable empirical-study runner over the normalized historical DuckDB database.
+- Implemented the first saved `calibration` study and the first saved `maker_taker_expectancy` study, both writing parquet data, metadata JSON, and short Markdown summaries under `logs/historical_research/studies/`.
+- Added focused synthetic end-to-end tests for study artifact contracts, venue-filtered runs, and CLI help behavior.
+- Updated the roadmap, Phase 0.5 guide, and README so `P0.5.3` is marked in progress and the next slice is clearly the remaining bias and sizing work.
+
+### Design decisions
+- Keep `P0.5.3` outputs as file-based local artifacts under the ignored research output root rather than wiring them into app Postgres or the live runtime.
+- Preserve venue and bucket conditioning directly in the saved tables so later loaders can consume interpretable surfaces instead of scraping notebook summaries.
+- Record both observed-role and inferred-counterparty role bases in the maker/taker study because Becker-style trade data does not always expose separate maker rows.
+
+### Why
+The repo had the historical dataset and normalized DuckDB layer, but it still lacked any durable empirical outputs. This slice turns the Phase 0.5 substrate into the first reusable calibration and execution-prior artifacts.
+
+### Impact
+- The repo now has a canonical study runner for baseline empirical work.
+- Phase 0.5 no longer depends on ad hoc SQL or notebooks to produce its first calibration and expectancy outputs.
+- The next `P0.5.3` work is now narrower and clearer: bias summaries, dispersion, and sizing-prior promotion.
+
+### How to verify
+- `conda run -n sleeperservice python -m services.tools.run_historical_studies --help` — confirms the new study runner and flags exist.
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 conda run -n sleeperservice python -m pytest tests/test_historical_studies.py -q` — passes the focused study-runner and artifact-contract coverage.
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 conda run -n sleeperservice python -m pytest tests/test_historical_research_materialize.py tests/test_historical_studies.py -q` — confirms the normalized layer and the new study layer work end to end on synthetic fixtures.
+- `git diff --check` — confirms the patch is whitespace-clean.
+
+```mermaid
+flowchart TD
+  duckdb[historical_research.duckdb] --> runner[run_historical_studies]
+  runner --> calibration[calibration study]
+  runner --> execution[maker_taker_expectancy study]
+  calibration --> calArtifacts[parquet + metadata + summary]
+  execution --> execArtifacts[parquet + metadata + summary]
+  calArtifacts --> studiesDir[logs/historical_research/studies]
+  execArtifacts --> studiesDir
+```
+
 ## 2026-03-17 — Expanded P0.5.3 empirical study specification
 
 ### What changed
