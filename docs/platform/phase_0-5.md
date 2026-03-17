@@ -149,6 +149,160 @@ Turn raw trades into stable analytical views that later platform code can depend
 
 Produce the first durable studies that can shape platform decisions instead of notebook-only conclusions.
 
+### Why this slice matters
+
+This is the point where the historical-research substrate stops being “data infrastructure” and starts becoming reusable platform knowledge.
+
+`P0.5.1` and `P0.5.2` gave the repo:
+- a real dataset landing path
+- a profiler and quality surface
+- normalized DuckDB views over Becker data
+
+`P0.5.3` must convert that substrate into empirical priors that are strong enough to influence later:
+- replay policy
+- execution posture
+- risk haircuts
+- signal ranking
+- analysis API outputs
+
+The quality bar should be materially higher than:
+- notebook screenshots
+- one-off SQL queries
+- social-post “edges”
+- strategy claims with no denominator, no conditioning, and no reproducible artifact trail
+
+### Research posture
+
+Treat this phase as empirical market microstructure and calibration research, not as a loose backtesting sprint.
+
+The intent is:
+- descriptive first
+- conditional rather than global
+- venue-aware rather than blended
+- reproducible rather than anecdotal
+- interpretable enough that a later runtime can consume the result as a contract
+
+The intent is not:
+- to prove live alpha from one historical study bundle
+- to fit a fragile predictive model and call it a strategy
+- to collapse Polymarket and Kalshi into one behavioral surface
+- to promote outputs that cannot survive basic robustness checks
+
+### Research quality bar
+
+The study package for this phase should inherit two standards:
+
+1. Quant rigor
+   - every study should disclose sample size, conditioning dimensions, exclusions, and uncertainty
+   - predictive or policy-facing claims should be checked on time-sliced holdouts where appropriate
+   - outputs should prefer stable effect estimates over clever but opaque modeling
+   - robustness checks should look for regime sensitivity, sparse-bucket failure, and sign flips
+2. Fintech-grade reliability
+   - every run should produce an audit trail with dataset identity, code identity, parameters, and artifact paths
+   - reruns should be deterministic for the same dataset snapshot and parameter set
+   - artifacts should be versioned, machine-readable, and safe to consume without manual notebook reconstruction
+   - promotion into later platform hooks should require explicit contracts, not informal analyst judgment alone
+
+### Study design principles
+
+- Condition before aggregating.
+  - Default slices should include `venue`, `price_bucket`, and `time_to_resolution_bucket`.
+  - Add `topic_class`, `size_bucket`, `contract_side`, and related conditioning only where coverage remains credible.
+- Separate descriptive studies from policy studies.
+  - Descriptive studies explain what historically happened.
+  - Policy studies translate descriptive results into later execution or sizing guidance.
+- Prefer simple surfaces over black-box models in the first bundle.
+  - The first durable outputs should be tables and interpretable summaries, not model-heavy abstractions.
+- Preserve venue mechanics.
+  - Polymarket and Kalshi should remain separate until there is explicit evidence that a shared prior is justified.
+- Carry uncertainty forward.
+  - Sparse buckets, unstable periods, and wide empirical dispersion should survive into the output instead of being silently averaged away.
+
+### Baseline study bundle
+
+The first `P0.5.3` bundle should answer a narrow but durable set of questions.
+
+#### 1. Calibration surfaces
+
+Primary question:
+- how does quoted price relate to realized resolution probability as a function of time to resolution?
+
+Expected outputs:
+- bucketed calibration tables by `venue`, `price_bucket`, and `time_to_resolution_bucket`
+- miscalibration summaries showing realized minus implied probability
+- coverage and sample-size surfaces so downstream users can distinguish “no effect” from “not enough data”
+- short summaries calling out clear favorite or longshot distortions and near-expiry behavior
+
+#### 2. Maker vs taker expectancy
+
+Primary question:
+- where did passive posting historically outperform taking, and where did urgency historically cost the most?
+
+Expected outputs:
+- expectancy tables by `venue`, `maker_taker`, `price_bucket`, and `time_to_resolution_bucket`
+- optional conditioning by `topic_class` or `size_bucket` where sample depth supports it
+- execution-policy summaries that identify where passive behavior structurally dominates and where taking appears least harmful
+
+Important caveat:
+- maker or taker inference is only as strong as the normalized source fields and venue-specific mapping, so every artifact must state the inference basis and data coverage clearly
+
+#### 3. Longshot or favorite bias summaries
+
+Primary question:
+- which venues, topics, or market families exhibit repeatable probability distortion at the tails?
+
+Expected outputs:
+- venue-specific bias summaries
+- topic-class or market-family bias tables where metadata quality is adequate
+- stability checks across coarse time periods so one regime does not masquerade as a durable prior
+
+#### 4. Edge-dispersion and sizing priors
+
+Primary question:
+- where is realized edge so noisy that later sizing logic should haircut model confidence even when mean edge looks positive?
+
+Expected outputs:
+- empirical dispersion summaries by core buckets
+- simple sizing-haircut reference tables derived from observed dispersion rather than abstract Kelly-only logic
+- clear flags for sparse or unstable buckets that should remain experimental
+
+### Output contract for every study
+
+Every saved study should produce the same minimum artifact set:
+
+- `metadata.json`
+  - study name and version
+  - dataset manifest or dataset identifier
+  - code commit or working-tree identifier
+  - run timestamp
+  - parameters and bucket definitions
+  - source views consumed
+  - row counts, exclusions, and warnings
+- one or more machine-readable data artifacts such as parquet or JSON
+  - tables should be normalized enough for later loaders and replay jobs to consume directly
+- `summary.md`
+  - plain-language interpretation
+  - key findings
+  - caveats and promotion recommendation
+
+Outputs should live under a stable local structure rooted at `logs/historical_research/studies/` with venue separation explicit in either the directory layout, file naming, or both.
+
+### Promotion criteria
+
+An empirical result is only durable enough for `P0.5.4` if it satisfies all of the following:
+
+- the effect is interpretable in plain language
+- the bucket definitions and conditioning dimensions are explicit
+- sample sizes are large enough to make the summary credible
+- simple robustness checks do not reverse the sign or basic conclusion
+- the artifact can be expressed as a stable contract for later consumers
+
+Keep a study experimental if:
+- the effect depends on one narrow time window
+- the result disappears under minimal holdout or stability checks
+- the underlying fields are too inferred or too sparse
+- the summary cannot explain why a later runtime should trust the output
+
 ### Deliverables
 
 - price by time-to-resolution calibration surfaces
@@ -159,30 +313,50 @@ Produce the first durable studies that can shape platform decisions instead of n
 
 ### Implementation plan
 
-1. Add a dedicated studies package.
-   - Split study logic into separate modules for calibration, execution, bias, and sizing priors.
-2. Standardize study outputs.
-   - Write machine-readable outputs such as parquet or JSON.
-   - Write a short human summary for fast inspection.
-   - Include metadata needed to reproduce the run later.
-3. Add the study runner.
+1. Add a dedicated studies package and shared contracts.
+   - Introduce `services/research/studies/` as the home for durable empirical work.
+   - Split logic into explicit modules such as `calibration`, `execution`, `bias`, `sizing`, `contracts`, and `runner`.
+   - Centralize study metadata, dataset fingerprinting, and artifact-writing helpers instead of duplicating them per study.
+2. Define the baseline study schema before writing analysis code.
+   - Standardize required metadata fields, artifact naming, and run layout.
+   - Standardize how bucket definitions, exclusions, warnings, and sample counts are recorded.
+   - Make the output schema stable enough that later phases can load it without scraping Markdown.
+3. Build shared analytical primitives.
+   - Add reusable helpers for bucket coverage, simple uncertainty summaries, stability checks, and venue-preserving aggregations.
+   - Keep the first implementation table-driven and auditable; do not hide the core logic behind opaque modeling.
+4. Implement studies in a strict order.
+   - Start with calibration surfaces because they are the cleanest descriptive output and a natural quality check on the normalized layer.
+   - Add maker-vs-taker expectancy next because it most directly informs later execution policy.
+   - Add longshot-or-favorite bias summaries after the calibration path is stable.
+   - Add edge-dispersion and simple sizing-prior outputs last because they depend on the credibility of the earlier surfaces.
+5. Add the study runner.
    - Add `services/tools/run_historical_studies.py`.
-   - Support running one study or the initial baseline bundle.
-4. Save outputs under a stable local layout.
-   - Use a predictable output structure under `logs/historical_research/studies/`.
-   - Keep venue separation explicit in file names and metadata.
-5. Only promote interpretable outputs.
-   - If a study cannot be explained clearly, keep it experimental and do not treat it as a platform prior yet.
+   - Support running a single study, one venue, or the initial baseline bundle.
+   - Make reruns safe and deterministic for the same dataset snapshot and parameter set.
+6. Save outputs under a stable local layout.
+   - Use a predictable directory structure under `logs/historical_research/studies/`.
+   - Keep venue separation explicit in both metadata and artifact naming.
+   - Preserve enough audit detail that a future consumer can trace any table back to dataset, code version, and study parameters.
+7. Add focused verification around research logic, not just CLI plumbing.
+   - Cover bucket construction, metadata writing, and core aggregation behavior with small fixtures.
+   - Add at least one end-to-end study test over a synthetic DuckDB fixture so the output contract stays stable.
+8. Document what is promotable versus experimental.
+   - Each summary should state whether the result is descriptive only, a candidate execution prior, or too unstable for promotion.
+   - Do not let an interesting artifact become a platform dependency unless its contract and interpretation are both clear.
 
 ### Verification target
 
 - one documented command runs the baseline study bundle
 - each study writes machine-readable outputs plus a short summary
+- each study records dataset identity, code identity, parameters, and exclusions in metadata
+- baseline outputs include sample-size and coverage context rather than headline metrics alone
 - rerunning on the same dataset slice reproduces the same artifacts and metadata
 
 ### Exit criteria
 
 - saved study outputs exist for calibration, maker or taker expectancy, and baseline sizing priors
+- the first bundle produces venue-specific outputs with explicit conditioning dimensions and coverage context
+- every promoted output has a machine-readable contract plus a plain-language interpretation
 - outputs are reproducible from one documented command
 - results are interpretable enough to inform execution and risk policy later
 

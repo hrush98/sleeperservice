@@ -20,6 +20,44 @@ flowchart TD
   poller -->|focus_only| ws[Polymarket_WS_subscriptions]
   trader -->|focus_only| trading[TradeSignals_and_CLOB_exec]
 
+## 2026-03-17 — Expanded P0.5.3 empirical study specification
+
+### What changed
+- Expanded `docs/platform/phase_0-5.md` so `P0.5.3 Baseline empirical studies` now has a detailed research brief instead of a short placeholder.
+- Added explicit study posture, quality standards, baseline bundle definitions, artifact contract requirements, and promotion criteria for durable outputs.
+- Tightened the implementation plan so the work proceeds through shared contracts, analytical primitives, ordered study delivery, and verification of the research logic itself.
+
+### Design decisions
+- Treat `P0.5.3` as a durable empirical-priors phase, not a generic backtesting sprint.
+- Require quant-style conditioning, sample disclosure, and robustness checks before a result can be considered promotable.
+- Require fintech-style auditability and deterministic artifact production so later platform phases can consume saved outputs safely.
+
+### Why
+With the Becker dataset landed and the normalized DuckDB layer working, the next risk was not missing infrastructure but under-specified research execution. The phase guide needed a much sharper definition of what “good” looks like before implementation starts.
+
+### Impact
+- No runtime behavior changed from this documentation patch alone.
+- Phase 0.5 now has a significantly clearer execution standard for calibration, execution expectancy, bias, and sizing-prior studies.
+- Later implementation slices can build directly against a defined artifact and promotion contract instead of inventing study semantics ad hoc.
+
+### How to verify
+- `sed -n '140,320p' docs/platform/phase_0-5.md` — confirm the expanded `P0.5.3` section includes research posture, quality bar, baseline study bundle, output contract, and promotion criteria.
+- `git diff --check` — confirm the docs patch is whitespace-clean.
+
+```mermaid
+flowchart TD
+  normalized[Normalized DuckDB views] --> studies[Study runner and shared contracts]
+  studies --> calibration[Calibration surfaces]
+  studies --> execution[Maker vs taker expectancy]
+  studies --> bias[Longshot or favorite bias]
+  studies --> sizing[Edge dispersion and sizing priors]
+  calibration --> artifacts[Versioned study artifacts]
+  execution --> artifacts
+  bias --> artifacts
+  sizing --> artifacts
+  artifacts --> promotion[Promotion review for P0.5.4 hooks]
+```
+
 ## 2026-03-17 — Landed Becker dataset support for Phase 0.5
 
 ### What changed
