@@ -59,6 +59,51 @@ flowchart TD
   execArtifacts --> studiesDir
 ```
 
+## 2026-03-17 — Extended P0.5.3 bundle with bias and sizing studies
+
+### What changed
+- Added `services.research.studies.bias` for longshot/favorite bias summaries over the normalized historical trade view.
+- Added `services.research.studies.sizing` for dispersion surfaces and conservative sizing-prior reference tables.
+- Extended the study runner so the baseline bundle now includes `longshot_favorite_bias` and `sizing_priors` alongside the earlier calibration and expectancy studies.
+- Expanded the synthetic study fixture and assertions so the saved artifact contract now covers tail-bias and sizing-prior outputs.
+- Updated the roadmap, Phase 0.5 guide, and README so the docs reflect the full four-study baseline bundle and the next step is Becker-scale review rather than adding more first-pass studies.
+
+### Design decisions
+- Keep the bias study descriptive and venue-aware by conditioning on `venue`, `topic_class`, and tail regime instead of trying to infer a universal probability-distortion prior.
+- Use coarse year-level stability checks for the first bias pass so regime drift is visible without overfitting tiny time windows.
+- Keep sizing outputs conservative by treating them as haircut and promotion references, not direct Kelly recommendations or live execution policy.
+
+### Why
+The first `P0.5.3` slice established the study runner and the initial calibration and execution outputs, but the baseline empirical bundle was still incomplete against the Phase 0.5 plan. This slice completes the first-pass bundle so later review can focus on durability instead of missing study categories.
+
+### Impact
+- The baseline historical-study bundle now covers calibration, maker/taker expectancy, tail-bias, and sizing-prior surfaces.
+- `P0.5.3` can now shift from “add missing outputs” to “review real Becker outputs and decide what is promotable.”
+- No live runtime behavior changed; all outputs remain local research artifacts under `logs/historical_research/studies/`.
+
+### How to verify
+- `conda run -n sleeperservice python -m services.tools.run_historical_studies --help` — confirms the runner exposes `longshot_favorite_bias` and `sizing_priors`.
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 conda run -n sleeperservice python -m pytest tests/test_historical_studies.py -q` — passes the focused end-to-end study coverage for the expanded baseline bundle.
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 conda run -n sleeperservice python -m pytest tests/test_historical_research_materialize.py tests/test_historical_studies.py -q` — confirms the normalized layer and the four-study bundle still compose correctly on synthetic fixtures.
+- `git diff --check` — confirms the patch is whitespace-clean.
+
+```mermaid
+flowchart TD
+  duckdb[historical_research.duckdb] --> runner[run_historical_studies]
+  runner --> calibration[calibration study]
+  runner --> execution[maker_taker_expectancy study]
+  runner --> bias[longshot_favorite_bias study]
+  runner --> sizing[sizing_priors study]
+  calibration --> calArtifacts[parquet + metadata + summary]
+  execution --> execArtifacts[parquet + metadata + summary]
+  bias --> biasArtifacts[parquet + metadata + summary]
+  sizing --> sizingArtifacts[parquet + metadata + summary]
+  calArtifacts --> studiesDir[logs/historical_research/studies]
+  execArtifacts --> studiesDir
+  biasArtifacts --> studiesDir
+  sizingArtifacts --> studiesDir
+```
+
 ## 2026-03-17 — Expanded P0.5.3 empirical study specification
 
 ### What changed

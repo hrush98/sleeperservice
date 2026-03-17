@@ -44,13 +44,13 @@ By the end of `Phase 0.5`, the repo should have:
 `P0.5.3` has now started with:
 - a dedicated study package
 - the first baseline runner and artifact contract
-- saved calibration and maker/taker expectancy outputs
+- saved calibration, maker/taker expectancy, longshot/favorite bias, and sizing-prior outputs
 
 The next implementation slice inside `P0.5.3` should now:
 
-1. add longshot/favorite bias summaries
-2. add edge-dispersion and baseline sizing-prior outputs
-3. review the first Becker-scale results and decide which outputs are durable enough to promote into later replay, ranking, and risk hooks
+1. review the first Becker-scale results and decide which outputs are durable enough to promote into later replay, ranking, and risk hooks
+2. tighten promotion thresholds, warnings, and artifact fields where real-data instability shows up
+3. start shaping the `P0.5.4` contract and loader surface around the outputs that survive review
 
 ## P0.5.1 Dataset landing and audit
 
@@ -358,7 +358,7 @@ Keep a study experimental if:
 
 ### Exit criteria
 
-- saved study outputs exist for calibration, maker or taker expectancy, and baseline sizing priors
+- saved study outputs exist for calibration, maker or taker expectancy, longshot or favorite bias, and baseline sizing priors
 - the first bundle produces venue-specific outputs with explicit conditioning dimensions and coverage context
 - every promoted output has a machine-readable contract plus a plain-language interpretation
 - outputs are reproducible from one documented command

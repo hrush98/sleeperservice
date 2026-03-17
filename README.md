@@ -90,6 +90,7 @@ HISTORICAL_DATASET_ROOT=/absolute/path/to/prediction-markets-data python -m serv
 python -m services.tools.run_historical_studies --help
 python -m services.tools.run_historical_studies
 python -m services.tools.run_historical_studies --study calibration --venue polymarket
+python -m services.tools.run_historical_studies --study longshot_favorite_bias --study sizing_priors --venue polymarket
 ```
 
 ## Testing

@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Callable
 
+from services.research.studies.bias import run_longshot_favorite_bias_study
 from services.research.settings import HistoricalResearchSettings
 from services.research.studies.calibration import run_calibration_study
 from services.research.studies.common import (
@@ -19,10 +20,13 @@ from services.research.studies.common import (
 )
 from services.research.studies.contracts import StudyArtifacts, StudyBundleArtifacts, StudyRunContext
 from services.research.studies.execution import run_maker_taker_expectancy_study
+from services.research.studies.sizing import run_sizing_priors_study
 
 AVAILABLE_STUDY_NAMES: tuple[str, ...] = (
     "calibration",
     "maker_taker_expectancy",
+    "longshot_favorite_bias",
+    "sizing_priors",
 )
 BASELINE_STUDY_NAMES: tuple[str, ...] = AVAILABLE_STUDY_NAMES
 
@@ -31,6 +35,8 @@ StudyExecutor = Callable[[object, StudyRunContext], StudyArtifacts]
 _STUDY_EXECUTORS: dict[str, StudyExecutor] = {
     "calibration": run_calibration_study,
     "maker_taker_expectancy": run_maker_taker_expectancy_study,
+    "longshot_favorite_bias": run_longshot_favorite_bias_study,
+    "sizing_priors": run_sizing_priors_study,
 }
 
 
