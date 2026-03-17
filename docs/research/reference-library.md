@@ -195,26 +195,8 @@ Use this document as the canonical reference index when building new strategy or
 
 ## Guide-derived references and judgments
 
-### Guide 1 - LMSR / EV / Kelly thread
-- Repo file: `docs/strategy_ref/guide1.md`
-- Keep:
-  - EV framing
-  - Bayes
-  - Kelly and fractional Kelly discipline
-- Do not copy directly:
-  - LMSR as a description of current Polymarket trading
-- Use as:
-  - trader-discipline reference
-
-### Guide 2 - LSTM directional bot thread
-- Repo file: `docs/strategy_ref/guide2.md`
-- Keep:
-  - general reminder that confidence estimation matters
-- Main caution:
-  - weak structural grounding for this repo
-  - high leakage and overfitting risk
-- Use as:
-  - low-priority inspiration only
+Only retained guides with durable repo value are listed here.
+Low-signal or mechanically misleading social-thread notes were pruned from `docs/strategy_ref/`.
 
 ### Guide 3 - Domer / EV / Kelly / Bayes thread
 - Repo file: `docs/strategy_ref/guide3.md`
@@ -258,6 +240,22 @@ Use this document as the canonical reference index when building new strategy or
   - one of the best inputs for replay, risk calibration, and execution analytics
   - a strong fit for Polymarket-native sophistication when external live feeds are unreliable
 
+### Guide 7 - Institutional desk blueprint
+- Repo file: `docs/strategy_ref/guide7.md`
+- Keep:
+  - market-graph and conditional-arbitrage framing
+  - explicit separation of research, execution, and risk
+  - calibration surfaces and execution-aware thinking
+  - cross-venue and semantic-identity ideas as future expansion lanes
+- Main caution:
+  - mostly repackages ideas already captured by Guides 4 through 6 and the platform docs
+  - the institutional stack and latency framing is more aesthetic than immediately useful for this repo
+  - do not treat the example formulas or desk tooling list as a validated recipe for live edge
+  - sports-lag, mempool-resolution, and broad news-ingestion lanes remain lower-priority than Polymarket-native structure and replay-backed execution research
+- Use as:
+  - confirmation that the repo should prioritize structural edge, replay, and execution quality
+  - a strategy taxonomy reference, not a net-new alpha source
+
 ## How these references map to the platform
 
 ### For architecture
@@ -278,7 +276,7 @@ Use this document as the canonical reference index when building new strategy or
 
 ### For trader process and risk discipline
 - Hanson scoring-rule background
-- EV / Bayes / Kelly guide material
+- Guide 3
 - Guide 6 when used as a conditioning and sizing reference rather than a direct trading recipe
 - Damodaran note for threshold-probability explanations
 
