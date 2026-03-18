@@ -20,6 +20,40 @@ flowchart TD
   poller -->|focus_only| ws[Polymarket_WS_subscriptions]
   trader -->|focus_only| trading[TradeSignals_and_CLOB_exec]
 
+## 2026-03-18 — Persisted normalized historical tables in DuckDB
+
+### What changed
+- Switched the normalized `historical_*` research layer in `services.research.materialize` from persistent DuckDB views to persistent DuckDB tables.
+- Kept raw Becker parquet access in temporary source views during materialization, then wrote the normalized historical layer into stored DuckDB tables for later study runs.
+- Recorded the storage mode in materialization metadata and extended the materialization tests to assert that the core `historical_*` objects are `BASE TABLE`s.
+- Updated the materializer CLI text, README, roadmap, and Phase 0.5 guide so the docs match the new persisted-table design.
+
+### Design decisions
+- Pay the large parquet scan cost once during materialization rather than on every downstream calibration or expectancy query.
+- Keep only the normalized analytical layer persistent in DuckDB; raw Becker parquet remains external and untracked.
+- Leave the existing `view_row_counts` metadata key in place for compatibility, even though the counted objects are now persisted tables.
+
+### Why
+The first real Becker review exposed that the database was only storing view definitions, so every study query effectively re-read tens of thousands of raw parquet files. That is the wrong performance profile for iterative Phase 0.5 empirical work, especially when Polymarket review needs to be safe to run interactively.
+
+### Impact
+- Future study runs can read persisted normalized tables instead of rescanning raw parquet through view chains.
+- Materialization becomes a more meaningful one-time build step for a dataset snapshot.
+- Phase 0.5 review work should now be safer to do venue-by-venue, especially for Polymarket-first analysis.
+
+### How to verify
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 conda run -n sleeperservice python -m pytest tests/test_historical_research_materialize.py -q` — confirms the materializer still works and the normalized objects are persisted tables.
+- `conda run -n sleeperservice python -m services.tools.materialize_historical_research --help` — confirms the CLI entrypoint still loads cleanly.
+- `git diff --check` — confirms the patch is whitespace-clean.
+
+```mermaid
+flowchart TD
+  parquet[Becker parquet files] --> tempViews[Temporary source DuckDB views]
+  tempViews --> normalized[historical_* persisted DuckDB tables]
+  normalized --> studies[Historical study runner]
+  studies --> artifacts[parquet + metadata + summary]
+```
+
 ## 2026-03-17 — Landed first P0.5.3 historical study bundle
 
 ### What changed

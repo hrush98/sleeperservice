@@ -124,7 +124,7 @@ Phase 0.5 historical-research tooling uses:
 
 - `HISTORICAL_DATASET_ROOT` for the external parquet dataset root
 - `HISTORICAL_RESEARCH_OUTPUT_ROOT` for generated manifests and summaries
-- `duckdb` in the `sleeperservice` environment for normalized research materialization
+- `duckdb` in the `sleeperservice` environment for normalized research materialization into persisted DuckDB tables
 - `--skip-view-row-counts` on the materializer when the target dataset is large enough that final view counts are not practical to compute during the build
 
 ## Docker

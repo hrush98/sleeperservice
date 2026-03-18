@@ -1,4 +1,4 @@
-"""Materialize normalized historical research views into a local DuckDB database."""
+"""Materialize normalized historical research tables into a local DuckDB database."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from services.research.settings import HistoricalResearchSettings
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Build normalized historical research views in a local DuckDB database under "
+            "Build normalized historical research tables in a local DuckDB database under "
             "HISTORICAL_RESEARCH_OUTPUT_ROOT."
         )
     )

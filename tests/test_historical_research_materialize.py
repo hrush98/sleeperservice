@@ -29,7 +29,7 @@ def test_feature_derivations_cover_core_buckets():
     assert time_to_resolution_seconds("2025-01-05T00:00:00Z", "2025-01-10T00:00:00Z") == pytest.approx(432000.0)
 
 
-def test_materialize_historical_research_builds_expected_views(tmp_path):
+def test_materialize_historical_research_builds_expected_tables(tmp_path):
     dataset_root = tmp_path / "dataset"
     output_root = tmp_path / "outputs"
     _write_test_parquet_dataset(dataset_root)
@@ -58,13 +58,35 @@ def test_materialize_historical_research_builds_expected_views(tmp_path):
         bucket_stats_count = connection.execute(
             "SELECT COUNT(*) FROM historical_bucket_stats"
         ).fetchone()[0]
+        table_types = connection.execute(
+            """
+            SELECT table_name, table_type
+            FROM information_schema.tables
+            WHERE table_name IN (
+                'historical_trades',
+                'historical_markets',
+                'historical_resolutions',
+                'historical_trade_features',
+                'historical_bucket_stats'
+            )
+            ORDER BY table_name
+            """
+        ).fetchall()
     finally:
         connection.close()
 
+    assert artifacts.metadata["normalized_storage"] == "persistent_tables"
     assert artifacts.metadata["view_row_counts"]["historical_trades"] == 2
     assert artifacts.metadata["view_row_counts"]["historical_markets"] == 2
     assert artifacts.metadata["view_row_counts"]["historical_trade_features"] == 2
     assert bucket_stats_count == 2
+    assert table_types == [
+        ("historical_bucket_stats", "BASE TABLE"),
+        ("historical_markets", "BASE TABLE"),
+        ("historical_resolutions", "BASE TABLE"),
+        ("historical_trade_features", "BASE TABLE"),
+        ("historical_trades", "BASE TABLE"),
+    ]
     assert trade_features == [
         ("kalshi", "k_trade_1", "k_market_1", 0.35, "maker", "25c_to_40c", "7d_to_30d", "lt_10_usd", "crypto"),
         ("polymarket", "pm_trade_1", "pm_market_1", 0.62, "taker", "60c_to_75c", "1d_to_7d", "10_to_50_usd", "politics"),
@@ -106,6 +128,7 @@ def test_materialize_historical_research_supports_becker_style_dataset(tmp_path)
     finally:
         connection.close()
 
+    assert artifacts.metadata["normalized_storage"] == "persistent_tables"
     assert artifacts.metadata["view_row_counts"]["historical_trades"] == 3
     assert artifacts.metadata["view_row_counts"]["historical_markets"] == 2
     assert artifacts.metadata["view_row_counts"]["historical_trade_features"] == 3

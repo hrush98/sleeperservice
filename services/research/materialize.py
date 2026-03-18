@@ -86,7 +86,7 @@ def materialize_historical_research(
     connection = duckdb.connect(str(db_path))
     try:
         created_views = _create_source_views(connection, source_collection_map)
-        _create_normalized_views(connection, source_collection_map, created_views)
+        _create_normalized_tables(connection, source_collection_map, created_views)
         if collect_view_row_counts:
             view_row_counts = {
                 view_name: int(connection.execute(f"SELECT COUNT(*) FROM {quote_identifier(view_name)}").fetchone()[0])
@@ -111,6 +111,7 @@ def materialize_historical_research(
         "output_root": str(output_root),
         "database_path": str(db_path),
         "duckdb_version": duckdb_version,
+        "normalized_storage": "persistent_tables",
         "view_row_counts_collected": collect_view_row_counts,
         "source_files": {
             venue: {
@@ -151,17 +152,16 @@ def _create_source_views(
                 else:
                     read_targets.extend(collection.absolute_paths)
             patterns_sql = ", ".join(_sql_string_literal(target) for target in read_targets)
-            connection.execute(
-                f"""
-                CREATE OR REPLACE VIEW {quote_identifier(view_name)} AS
-                SELECT * FROM read_parquet([{patterns_sql}], union_by_name=true)
-                """
+            _replace_temp_view(
+                connection,
+                view_name,
+                f"SELECT * FROM read_parquet([{patterns_sql}], union_by_name=true)",
             )
             created_views.add(view_name)
     return created_views
 
 
-def _create_normalized_views(
+def _create_normalized_tables(
     connection: object,
     source_collection_map: dict[str, dict[str, list[object]]],
     created_views: set[str],
@@ -220,10 +220,10 @@ def _create_normalized_views(
                 )
             )
 
-    connection.execute(
-        f"""
-        CREATE OR REPLACE VIEW historical_trades AS
-        {union_selects_or_empty(
+    _replace_table(
+        connection,
+        "historical_trades",
+        union_selects_or_empty(
             trade_selects,
             empty_select_sql(
                 {
@@ -243,13 +243,12 @@ def _create_normalized_views(
                     "topic_raw": "VARCHAR",
                 }
             ),
-        )}
-        """
+        ),
     )
-    connection.execute(
-        f"""
-        CREATE OR REPLACE VIEW historical_markets_base AS
-        {union_selects_or_empty(
+    _replace_temp_view(
+        connection,
+        "historical_markets_base",
+        union_selects_or_empty(
             market_selects,
             empty_select_sql(
                 {
@@ -267,12 +266,12 @@ def _create_normalized_views(
                     "resolved_outcome": "VARCHAR",
                 }
             ),
-        )}
-        """
+        ),
     )
-    connection.execute(
+    _replace_table(
+        connection,
+        "historical_markets",
         """
-        CREATE OR REPLACE VIEW historical_markets AS
         SELECT
             venue,
             market_id,
@@ -289,12 +288,12 @@ def _create_normalized_views(
         FROM historical_markets_base
         WHERE market_id IS NOT NULL
         GROUP BY venue, market_id
-        """
+        """,
     )
-    connection.execute(
-        f"""
-        CREATE OR REPLACE VIEW historical_resolutions_base AS
-        {union_selects_or_empty(
+    _replace_temp_view(
+        connection,
+        "historical_resolutions_base",
+        union_selects_or_empty(
             resolution_selects,
             empty_select_sql(
                 {
@@ -305,12 +304,12 @@ def _create_normalized_views(
                     "resolution_value": "DOUBLE",
                 }
             ),
-        )}
-        """
+        ),
     )
-    connection.execute(
+    _replace_table(
+        connection,
+        "historical_resolutions",
         """
-        CREATE OR REPLACE VIEW historical_resolutions AS
         SELECT
             venue,
             market_id,
@@ -320,7 +319,7 @@ def _create_normalized_views(
         FROM historical_resolutions_base
         WHERE market_id IS NOT NULL
         GROUP BY venue, market_id
-        """
+        """,
     )
 
     time_to_resolution_seconds_expr = (
@@ -340,9 +339,10 @@ def _create_normalized_views(
         "COALESCE(t.title, m.title)",
     )
 
-    connection.execute(
+    _replace_table(
+        connection,
+        "historical_trade_features",
         f"""
-        CREATE OR REPLACE VIEW historical_trade_features AS
         SELECT
             t.venue,
             t.trade_id,
@@ -376,11 +376,12 @@ def _create_normalized_views(
         LEFT JOIN historical_resolutions AS r
           ON t.venue = r.venue
          AND t.market_id = r.market_id
-        """
+        """,
     )
-    connection.execute(
+    _replace_table(
+        connection,
+        "historical_bucket_stats",
         """
-        CREATE OR REPLACE VIEW historical_bucket_stats AS
         SELECT
             venue,
             COALESCE(price_bucket, 'unknown') AS price_bucket,
@@ -394,6 +395,28 @@ def _create_normalized_views(
             AVG(time_to_resolution_seconds) AS avg_time_to_resolution_seconds
         FROM historical_trade_features
         GROUP BY 1, 2, 3, 4, 5, 6
+        """,
+    )
+
+
+def _replace_temp_view(connection: object, relation_name: str, select_sql: str) -> None:
+    connection.execute(f"DROP VIEW IF EXISTS {quote_identifier(relation_name)}")
+    connection.execute(f"DROP TABLE IF EXISTS {quote_identifier(relation_name)}")
+    connection.execute(
+        f"""
+        CREATE TEMP VIEW {quote_identifier(relation_name)} AS
+        {select_sql}
+        """
+    )
+
+
+def _replace_table(connection: object, relation_name: str, select_sql: str) -> None:
+    connection.execute(f"DROP VIEW IF EXISTS {quote_identifier(relation_name)}")
+    connection.execute(f"DROP TABLE IF EXISTS {quote_identifier(relation_name)}")
+    connection.execute(
+        f"""
+        CREATE TABLE {quote_identifier(relation_name)} AS
+        {select_sql}
         """
     )
 
@@ -441,13 +464,14 @@ def _render_summary(metadata: dict[str, Any]) -> str:
             f"- Output root: `{metadata['output_root']}`",
             f"- DuckDB database: `{metadata['database_path']}`",
             f"- DuckDB version: `{metadata['duckdb_version']}`",
+            f"- Normalized storage: `{metadata['normalized_storage']}`",
             f"- View row counts collected: {metadata['view_row_counts_collected']}",
             "",
             "## Source Files",
             "",
             *(source_lines or ["- None"]),
             "",
-            "## View Row Counts",
+            "## Normalized Row Counts",
             "",
             *(row_lines or ["- None"]),
             "",

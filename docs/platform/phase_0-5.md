@@ -107,7 +107,7 @@ Turn raw trades into stable analytical views that later platform code can depend
 ### Deliverables
 
 - a local DuckDB-backed normalized research schema
-- named views or materialized tables for:
+- persisted DuckDB tables for:
   - `historical_markets`
   - `historical_trades`
   - `historical_resolutions`
@@ -126,8 +126,8 @@ Turn raw trades into stable analytical views that later platform code can depend
    - Add an explicit `venue` field to every normalized table.
    - Normalize price, size, and resolution fields into stable analytical types.
 3. Create downstream study inputs.
-   - Publish shared base views with `venue` preserved.
-   - Publish venue-specific views or materializations for Polymarket-first studies.
+   - Publish shared base tables with `venue` preserved.
+   - Publish venue-specific tables or materializations for Polymarket-first studies.
 4. Add the materialization entrypoint.
    - Add `services/tools/materialize_historical_research.py` as the canonical local builder.
    - Make it safe to rerun without touching app Postgres or live runtime code.
@@ -137,13 +137,13 @@ Turn raw trades into stable analytical views that later platform code can depend
 ### Verification target
 
 - `conda run -n sleeperservice python -m services.tools.materialize_historical_research --help`
-- the normalized views materialize from the local dataset without manual SQL editing
+- the normalized tables materialize from the local dataset without manual SQL editing
 - on Becker-scale datasets, `--skip-view-row-counts` is available so the local build can finish without waiting on full final-view counts
 - feature-derivation tests pass in the `sleeperservice` environment
 
 ### Exit criteria
 
-- baseline studies can run from named views instead of ad hoc queries
+- baseline studies can run from named tables instead of ad hoc parquet scans or ad hoc queries
 - Polymarket analysis does not depend on blended Kalshi assumptions
 - rerunning the build reproduces the same normalized schema from the same dataset snapshot
 

@@ -269,8 +269,9 @@ Execution companion:
   - added Becker-specific Kalshi and Polymarket normalization for ticker-based Kalshi contracts, Polymarket token-id joins, block-timestamp joins, and legacy FPMM trades
   - added explicit `contract_side` support in normalized trade views so later studies can distinguish traded outcome from buy or sell action
   - added `--skip-view-row-counts` so Becker-scale materialization can finish without blocking on full final-view counts
+  - switched the normalized `historical_*` layer from view-only definitions to persisted DuckDB tables so Becker-scale study runs stop rescanning raw parquet on every query
 - target:
-  - create stable analytical views for historical markets, trades, resolutions, and trade features
+  - create stable analytical tables for historical markets, trades, resolutions, and trade features
   - separate venue-specific outputs from blended assumptions
 
 #### P0.5.3 Baseline empirical studies
