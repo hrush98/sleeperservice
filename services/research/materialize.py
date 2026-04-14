@@ -46,6 +46,7 @@ def materialize_historical_research(
     include_hidden: bool = False,
     max_files: int | None = None,
     collect_view_row_counts: bool = True,
+    include_bucket_stats: bool = True,
 ) -> MaterializationArtifacts:
     try:
         import duckdb
@@ -86,10 +87,19 @@ def materialize_historical_research(
     connection = duckdb.connect(str(db_path))
     try:
         created_views = _create_source_views(connection, source_collection_map)
-        _create_normalized_tables(connection, source_collection_map, created_views)
+        _create_normalized_tables(
+            connection,
+            source_collection_map,
+            created_views,
+            include_bucket_stats=include_bucket_stats,
+        )
         if collect_view_row_counts:
             view_row_counts = {
-                view_name: int(connection.execute(f"SELECT COUNT(*) FROM {quote_identifier(view_name)}").fetchone()[0])
+                view_name: (
+                    int(connection.execute(f"SELECT COUNT(*) FROM {quote_identifier(view_name)}").fetchone()[0])
+                    if _relation_exists(connection, view_name)
+                    else None
+                )
                 for view_name in TARGET_VIEW_NAMES
             }
         else:
@@ -112,6 +122,7 @@ def materialize_historical_research(
         "database_path": str(db_path),
         "duckdb_version": duckdb_version,
         "normalized_storage": "persistent_tables",
+        "include_bucket_stats": include_bucket_stats,
         "view_row_counts_collected": collect_view_row_counts,
         "source_files": {
             venue: {
@@ -165,6 +176,8 @@ def _create_normalized_tables(
     connection: object,
     source_collection_map: dict[str, dict[str, list[object]]],
     created_views: set[str],
+    *,
+    include_bucket_stats: bool = True,
 ) -> None:
     trade_selects: list[str] = []
     market_selects: list[str] = []
@@ -378,25 +391,29 @@ def _create_normalized_tables(
          AND t.market_id = r.market_id
         """,
     )
-    _replace_table(
-        connection,
-        "historical_bucket_stats",
-        """
-        SELECT
-            venue,
-            COALESCE(price_bucket, 'unknown') AS price_bucket,
-            COALESCE(time_to_resolution_bucket, 'unknown') AS time_to_resolution_bucket,
-            COALESCE(size_bucket, 'unknown') AS size_bucket,
-            COALESCE(maker_taker_role, 'unknown') AS maker_taker_role,
-            COALESCE(topic_class, 'unknown') AS topic_class,
-            COUNT(*) AS trade_count,
-            SUM(COALESCE(notional_usd, 0.0)) AS total_notional_usd,
-            AVG(price_probability) AS avg_price_probability,
-            AVG(time_to_resolution_seconds) AS avg_time_to_resolution_seconds
-        FROM historical_trade_features
-        GROUP BY 1, 2, 3, 4, 5, 6
-        """,
-    )
+    if include_bucket_stats:
+        _replace_table(
+            connection,
+            "historical_bucket_stats",
+            """
+            SELECT
+                venue,
+                COALESCE(price_bucket, 'unknown') AS price_bucket,
+                COALESCE(time_to_resolution_bucket, 'unknown') AS time_to_resolution_bucket,
+                COALESCE(size_bucket, 'unknown') AS size_bucket,
+                COALESCE(maker_taker_role, 'unknown') AS maker_taker_role,
+                COALESCE(topic_class, 'unknown') AS topic_class,
+                COUNT(*) AS trade_count,
+                SUM(COALESCE(notional_usd, 0.0)) AS total_notional_usd,
+                AVG(price_probability) AS avg_price_probability,
+                AVG(time_to_resolution_seconds) AS avg_time_to_resolution_seconds
+            FROM historical_trade_features
+            GROUP BY 1, 2, 3, 4, 5, 6
+            """,
+        )
+    else:
+        connection.execute('DROP VIEW IF EXISTS "historical_bucket_stats"')
+        connection.execute('DROP TABLE IF EXISTS "historical_bucket_stats"')
 
 
 def _replace_temp_view(connection: object, relation_name: str, select_sql: str) -> None:
@@ -419,6 +436,19 @@ def _replace_table(connection: object, relation_name: str, select_sql: str) -> N
         {select_sql}
         """
     )
+
+
+def _relation_exists(connection: object, relation_name: str) -> bool:
+    row = connection.execute(
+        """
+        SELECT 1
+        FROM information_schema.tables
+        WHERE table_schema = 'main' AND table_name = ?
+        LIMIT 1
+        """,
+        [relation_name],
+    ).fetchone()
+    return row is not None
 
 
 def _write_materialization_outputs(
@@ -465,6 +495,7 @@ def _render_summary(metadata: dict[str, Any]) -> str:
             f"- DuckDB database: `{metadata['database_path']}`",
             f"- DuckDB version: `{metadata['duckdb_version']}`",
             f"- Normalized storage: `{metadata['normalized_storage']}`",
+            f"- Bucket stats included: {metadata['include_bucket_stats']}",
             f"- View row counts collected: {metadata['view_row_counts_collected']}",
             "",
             "## Source Files",

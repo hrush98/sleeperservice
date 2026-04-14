@@ -17,6 +17,7 @@ Relationship to the older docs:
 Index:
 - `implementation-roadmap.md` - primary mutable execution document for the restructure
 - `historical-research-workstream.md` - dedicated plan for the historical-trades foundation and Phase 0.5 work
+- `api-v0-spec.md` - earliest viable paid read-only analysis API surface
 - `target-architecture.md` - concrete target system shape
 - `engineering-improvements.md` - codebase cleanup and platform hardening roadmap
 - `future-strategy-avenues.md` - prioritized expansion lanes, with emphasis on Polymarket-native strategies

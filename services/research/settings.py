@@ -53,3 +53,76 @@ class HistoricalResearchSettings:
                 "Set HISTORICAL_DATASET_ROOT or pass --dataset-root."
             )
         return self.dataset_root
+
+
+@dataclass(frozen=True)
+class ArtifactBucketSettings:
+    """S3-compatible storage settings for promoted historical artifacts."""
+
+    enabled: bool
+    bucket_name: str
+    prefix: str
+    endpoint_url: str | None
+    region: str | None
+    access_key_id: str | None
+    secret_access_key: str | None
+    session_token: str | None
+
+    @classmethod
+    def from_env(
+        cls,
+        environ: Mapping[str, str] | None = None,
+    ) -> "ArtifactBucketSettings":
+        env = environ if environ is not None else os.environ
+        return cls(
+            enabled=_parse_bool(env.get("ARTIFACT_BUCKET_ENABLED"), default=False),
+            bucket_name=(
+                env.get("ARTIFACT_BUCKET_NAME")
+                or env.get("BUCKET_NAME")
+                or ""
+            ).strip(),
+            prefix=(env.get("ARTIFACT_BUCKET_PREFIX") or "").strip().strip("/"),
+            endpoint_url=(
+                env.get("ARTIFACT_BUCKET_ENDPOINT_URL")
+                or env.get("AWS_ENDPOINT_URL")
+                or None
+            ),
+            region=(
+                env.get("ARTIFACT_BUCKET_REGION")
+                or env.get("AWS_REGION")
+                or env.get("AWS_DEFAULT_REGION")
+                or None
+            ),
+            access_key_id=(
+                env.get("ARTIFACT_BUCKET_ACCESS_KEY_ID")
+                or env.get("AWS_ACCESS_KEY_ID")
+                or None
+            ),
+            secret_access_key=(
+                env.get("ARTIFACT_BUCKET_SECRET_ACCESS_KEY")
+                or env.get("AWS_SECRET_ACCESS_KEY")
+                or None
+            ),
+            session_token=(
+                env.get("ARTIFACT_BUCKET_SESSION_TOKEN")
+                or env.get("AWS_SESSION_TOKEN")
+                or None
+            ),
+        )
+
+    def object_key(self, relative_path: str) -> str:
+        relative = relative_path.strip("/")
+        if not self.prefix:
+            return relative
+        return f"{self.prefix}/{relative}" if relative else self.prefix
+
+
+def _parse_bool(raw: str | None, *, default: bool) -> bool:
+    if raw is None:
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default

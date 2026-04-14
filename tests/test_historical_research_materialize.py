@@ -139,6 +139,38 @@ def test_materialize_historical_research_supports_becker_style_dataset(tmp_path)
     ]
 
 
+def test_materialize_historical_research_can_skip_bucket_stats(tmp_path):
+    dataset_root = tmp_path / "dataset"
+    output_root = tmp_path / "outputs"
+    _write_test_parquet_dataset(dataset_root)
+
+    artifacts = materialize_historical_research(
+        HistoricalResearchSettings(
+            dataset_root=dataset_root,
+            output_root=output_root,
+        ),
+        include_bucket_stats=False,
+    )
+
+    connection = duckdb.connect(str(artifacts.database_path))
+    try:
+        trade_feature_count = connection.execute("SELECT COUNT(*) FROM historical_trade_features").fetchone()[0]
+        bucket_stats_tables = connection.execute(
+            """
+            SELECT COUNT(*)
+            FROM information_schema.tables
+            WHERE table_schema = 'main' AND table_name = 'historical_bucket_stats'
+            """
+        ).fetchone()[0]
+    finally:
+        connection.close()
+
+    assert artifacts.metadata["include_bucket_stats"] is False
+    assert artifacts.metadata["view_row_counts"]["historical_bucket_stats"] is None
+    assert trade_feature_count == 2
+    assert bucket_stats_tables == 0
+
+
 def test_materialize_historical_research_help_does_not_require_database_url(monkeypatch, capsys):
     monkeypatch.delenv("DATABASE_URL", raising=False)
     monkeypatch.delenv("database_url", raising=False)

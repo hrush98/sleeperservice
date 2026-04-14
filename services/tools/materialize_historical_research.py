@@ -55,6 +55,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Skip final row-count verification on the normalized views. Useful for very large datasets.",
     )
+    parser.add_argument(
+        "--skip-bucket-stats",
+        action="store_true",
+        help="Skip building historical_bucket_stats when a study-ready DuckDB build is enough.",
+    )
     return parser
 
 
@@ -84,6 +89,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         include_hidden=args.include_hidden,
         max_files=args.max_files,
         collect_view_row_counts=not args.skip_view_row_counts,
+        include_bucket_stats=not args.skip_bucket_stats,
     )
 
     payload = {
@@ -91,6 +97,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "metadata_path": str(artifacts.metadata_path),
         "summary_path": str(artifacts.summary_path),
         "view_row_counts": artifacts.metadata["view_row_counts"],
+        "include_bucket_stats": artifacts.metadata["include_bucket_stats"],
     }
     if args.json:
         print(json.dumps(payload, indent=2, sort_keys=True))

@@ -14,7 +14,7 @@ The current active implementation phase is `Phase 0.5 - historical research foun
 ## Current runtimes
 
 - `services.cli`: operational CLI for discovery, live monitoring, and strategy tools
-- `services.api`: FastAPI service for health and ops endpoints
+- `services.api`: FastAPI service for health, ops, and the first read-only `v0` analysis endpoints
 - `services.coherence`: market-family scanner for coherence analysis
 - `services.tools`: one-off utilities, including Phase 0.5 historical-research entrypoints
 
@@ -73,6 +73,44 @@ sleeperservice discover --days 7
 uvicorn services.api.main:app --host 0.0.0.0 --port 8000
 ```
 
+Current read-only analysis routes:
+
+```bash
+curl http://127.0.0.1:8000/health
+curl -H "Authorization: Bearer change-me" http://127.0.0.1:8000/v0/analysis/opportunities
+curl -H "Authorization: Bearer change-me" "http://127.0.0.1:8000/v0/analysis/opportunities?categories=politics&include_trace=true"
+curl -H "Authorization: Bearer change-me" "http://127.0.0.1:8000/v0/markets/<market_id>/analysis?include_trace=true"
+```
+
+Current `v0` behavior:
+
+- ranked opportunities are driven by promoted historical priors over active Polymarket markets
+- single-market analysis combines one live market snapshot with promoted historical contexts
+- the first slice is read-only and does not expose execution or signal-history endpoints
+
+Current public-beta plumbing:
+
+- `API_AUTH_MODE=api_key` enables bearer API-key auth for `/v0/*`
+- `API_KEY_RECORDS` configures comma-separated `key_id:secret[:tier]` credentials
+- `API_DEFAULT_RATE_LIMIT_PER_MINUTE` applies single-instance in-memory throttling per caller
+- `API_MAINTENANCE_MODE=true` blocks `/v0/*` while keeping `/health` available
+- responses include `X-Request-ID`
+- errors use a deterministic envelope:
+
+```json
+{
+  "error": {
+    "code": "rate_limited",
+    "message": "Rate limit exceeded for this caller. Retry after the indicated cooldown.",
+    "retryable": true,
+    "details": {
+      "retry_after_seconds": 30
+    }
+  },
+  "request_id": "3d5d7d30780d4fa5a1ef4b1f3c4f6ce0"
+}
+```
+
 ### Coherence scanner
 
 ```bash
@@ -87,6 +125,7 @@ HISTORICAL_DATASET_ROOT=/absolute/path/to/prediction-markets-data python -m serv
 python -m services.tools.materialize_historical_research --help
 HISTORICAL_DATASET_ROOT=/absolute/path/to/prediction-markets-data python -m services.tools.materialize_historical_research
 HISTORICAL_DATASET_ROOT=/absolute/path/to/prediction-markets-data python -m services.tools.materialize_historical_research --skip-view-row-counts
+HISTORICAL_DATASET_ROOT=/absolute/path/to/prediction-markets-data python -m services.tools.materialize_historical_research --skip-view-row-counts --skip-bucket-stats
 python -m services.tools.run_historical_studies --help
 python -m services.tools.run_historical_studies
 python -m services.tools.run_historical_studies --study calibration --venue polymarket
@@ -126,6 +165,29 @@ Phase 0.5 historical-research tooling uses:
 - `HISTORICAL_RESEARCH_OUTPUT_ROOT` for generated manifests and summaries
 - `duckdb` in the `sleeperservice` environment for normalized research materialization into persisted DuckDB tables
 - `--skip-view-row-counts` on the materializer when the target dataset is large enough that final view counts are not practical to compute during the build
+- `--skip-bucket-stats` on the materializer when a study-ready build is enough and `historical_bucket_stats` is not needed
+- optional bucket sync for promoted artifacts at API startup:
+  - `ARTIFACT_BUCKET_ENABLED=true`
+  - `ARTIFACT_BUCKET_NAME` and optional `ARTIFACT_BUCKET_PREFIX`
+  - `ARTIFACT_BUCKET_ENDPOINT_URL` for S3-compatible providers such as Railway Buckets
+  - `ARTIFACT_BUCKET_ACCESS_KEY_ID` and `ARTIFACT_BUCKET_SECRET_ACCESS_KEY`
+  - `ARTIFACT_BUCKET_REGION` when your provider requires an explicit region
+
+For Railway Buckets, the intended deploy shape is:
+
+- deploy the API from GitHub
+- upload only promoted study outputs such as `studies/<run_id>/...` to the bucket
+- set `HISTORICAL_RESEARCH_OUTPUT_ROOT` to a writable local path in the container
+- enable the bucket sync env vars so the API downloads the promoted bundle during startup before serving requests
+
+Public beta API runtime also uses:
+
+- `API_PUBLIC_BETA_ENABLED` to expose or disable the public beta surface
+- `API_MAINTENANCE_MODE` and `API_MAINTENANCE_MESSAGE` for manual maintenance mode
+- `API_AUTH_MODE` with `disabled` for local-only smoke use or `api_key` for public beta
+- `API_KEY_RECORDS` for bearer API keys in `key_id:secret[:tier]` format
+- `API_DEFAULT_RATE_LIMIT_PER_MINUTE` for per-caller single-instance rate limiting
+- `API_REQUEST_LOGGING_ENABLED` for structured request logging with request IDs
 
 ## Docker
 

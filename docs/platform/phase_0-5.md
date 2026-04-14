@@ -41,16 +41,55 @@ By the end of `Phase 0.5`, the repo should have:
 
 ## Immediate next slice
 
-`P0.5.3` has now started with:
-- a dedicated study package
-- the first baseline runner and artifact contract
-- saved calibration, maker/taker expectancy, longshot/favorite bias, and sizing-prior outputs
+`P0.5.4` has now started with:
+- promoted historical-artifact loaders
+- the first `services.api.analysis_v0` service layer
+- the first read-only `v0` routes for ranked opportunities and market analysis
 
-The next implementation slice inside `P0.5.3` should now:
+The next implementation slice inside `P0.5.4` should now:
 
-1. review the first Becker-scale results and decide which outputs are durable enough to promote into later replay, ranking, and risk hooks
-2. tighten promotion thresholds, warnings, and artifact fields where real-data instability shows up
-3. start shaping the `P0.5.4` contract and loader surface around the outputs that survive review
+1. add a shared API plumbing layer before widening the public surface:
+   - auth or payment boundary
+   - rate limiting and abuse controls
+   - deterministic error handling
+   - maintenance mode and kill switch behavior
+2. keep the first public-beta implementation narrow and pragmatic:
+   - API-key auth first is acceptable if it gets the beta live faster
+   - preserve a clean boundary so `x402` can slot in without route churn
+   - keep rate limiting single-instance only if deployment remains single-instance
+3. add minimal operational visibility:
+   - request logging
+   - latency and status visibility
+   - basic smoke paths and launch checks
+4. document the launch posture:
+   - public beta, not alpha
+   - cheaper pricing
+   - explicit feedback solicitation
+   - clear read-only and no-SLA wording
+
+## Parallel launch overlay - `v0 Public Beta`
+
+This is not a separate phase.
+
+It is the release overlay for launching the first public analysis service while `Phase 0.5` remains active.
+
+Release policy:
+- internal alpha stays private
+- first public release is `v0 Public Beta`
+- beta pricing should stay cheaper and explicitly ask for feedback
+
+Minimum public-beta bar:
+- stable JSON schema for the two `v0` endpoints
+- working auth or payment flow
+- rate limiting and basic abuse controls
+- response provenance and warnings
+- basic monitoring plus a manual kill switch
+- short public docs with example requests
+
+Why it lives here:
+- `P0.5.3` decides which historical outputs are trustworthy enough to expose
+- `P0.5.4` turns those outputs into stable loaders and contracts for the live beta
+- later phases can improve the live service without forcing the first public launch to wait for full productization
 
 ## P0.5.1 Dataset landing and audit
 
@@ -368,13 +407,20 @@ Keep a study experimental if:
 
 ### Goal
 
-Make the research outputs usable by later phases without coupling the live runtime to raw datasets.
+Make the research outputs usable by later phases and the earliest paid read-only analysis endpoints, including the first public `v0 Public Beta`, without coupling the live runtime to raw datasets.
 
 ### Deliverables
 
 - versioned contracts for calibration surfaces, execution priors, historical analog lookup inputs, and replay-facing research outputs
 - loader or export helpers that read derived artifacts rather than raw parquet
 - a documented consumer map for replay, ranking, risk, and analysis API work
+- a shared public-beta plumbing layer for the live API:
+  - API-scoped config and maintenance controls
+  - auth or payment identity boundary
+  - rate limiting and abuse controls
+  - deterministic error responses
+  - request logging and minimal monitoring hooks
+  - short public-beta docs and smoke-test checklist
 
 ### Implementation plan
 
@@ -387,20 +433,76 @@ Make the research outputs usable by later phases without coupling the live runti
 3. Document downstream consumers.
    - For each later consumer, list the artifact it should read and the minimum fields it needs.
    - Keep this as a handoff point into `Phase 1`, `Phase 3`, and `Phase 4`.
+   - Prioritize the smallest useful analysis-API consumers before private live-trading consumers.
+   - Distinguish clearly between internal alpha consumers and the first public-beta consumers.
 4. Preserve the boundary.
    - Do not wire these contracts into `live.py`, `trader.py`, or direct execution flows during `Phase 0.5`.
+5. Add a shared API control surface.
+   - Introduce API-scoped settings for:
+     - public-beta enablement
+     - maintenance mode
+     - auth mode
+     - default rate limits
+     - request logging controls
+   - Keep these controls in shared API modules instead of route handlers.
+6. Add auth and caller identity first.
+   - Start with bearer API keys as the default public-beta path if it is the fastest stable launch route.
+   - Preserve a clean adapter boundary so `x402` can follow without rewriting handler logic.
+   - Record caller identity and tier in request context so limits, logs, and later billing hooks see the same subject.
+7. Add rate limiting and abuse controls.
+   - Enforce per-caller limits on the public analysis routes.
+   - Return deterministic `429` responses with retry guidance.
+   - It is acceptable for the first beta to use single-instance in-memory limits only if the deployment stays single-instance.
+8. Add shared error handling and maintenance mode.
+   - Define one JSON error envelope with stable fields such as:
+     - `error.code`
+     - `error.message`
+     - `request_id`
+     - `retryable`
+   - Add shared exception handling for auth failures, throttling, not-found cases, upstream dependency failures, and internal errors.
+   - Keep `/health` and essential ops visibility available when analysis routes are in maintenance mode.
+9. Add monitoring and launch docs.
+   - Capture request path, caller identity, status code, latency, and maintenance or throttle outcomes in structured logs.
+   - Add short public-beta docs with curl examples, limits, auth expectations, beta caveats, and a feedback path.
+10. Validate public-beta readiness.
+   - Add focused tests for auth success and failure, rate limiting, maintenance mode, and error-envelope stability.
+   - Run a short internal smoke pass before promoting the service publicly.
+
+### Suggested module boundaries
+
+The first public-beta plumbing slice should stay shared and boring.
+
+Prefer a layout such as:
+- `services/api/config.py` or equivalent for API-scoped settings
+- `services/api/auth.py` for caller identity and auth-mode selection
+- `services/api/rate_limit.py` for per-caller throttling
+- `services/api/errors.py` for shared error-envelope and exception handling
+- `services/api/middleware.py` for request IDs and request logging
+
+Do not bury these concerns inside `routers/analysis_v0.py`.
 
 ### Verification target
 
 - contract validation passes against saved study outputs
 - downstream docs can point to one artifact contract per use case
 - no live runtime module imports raw dataset tooling
+- public analysis routes reject unauthorized callers with deterministic `401` or `403` payloads
+- throttled callers receive deterministic `429` payloads with retry guidance
+- maintenance mode blocks public analysis routes without taking down `/health`
+- request logs carry a request ID and enough metadata to debug public-beta traffic
 
 ### Exit criteria
 
 - later phases can consume saved historical priors without access to the raw dataset
 - the research layer exposes stable contracts instead of one-off study outputs
 - replay, ranking, risk, and API work have a clear Phase 0.5 handoff surface
+- the first public `v0 Public Beta` can be soft-launched with:
+  - auth or payment working
+  - rate limiting in place
+  - deterministic errors
+  - basic monitoring
+  - a manual maintenance switch
+  - short public docs
 
 ## Do not do this in Phase 0.5
 

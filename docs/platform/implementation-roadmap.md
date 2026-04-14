@@ -53,7 +53,7 @@ When the active phase has a dedicated `phase_*.md` guide:
 - active branch: `phase_0`
 - current focus: `Phase 0.5 - historical research foundation`
 - previous completed focus: `Phase 0 - repo stabilization`
-- next milestone: review Becker-scale `P0.5.3` outputs and decide which empirical priors are durable enough to promote into `P0.5.4` contracts
+- next milestone: finish the `P0.5.4` public-beta plumbing slice so the first live `v0` routes have auth, rate limiting, deterministic errors, monitoring, maintenance controls, and launch docs
 
 ## Phase summary
 
@@ -79,6 +79,9 @@ When the active phase has a dedicated `phase_*.md` guide:
   - move research and empirical strategy validation earlier in the platform sequence
   - keep raw external data outside the live runtime and app database
 - primary references:
+  - `api-v0-spec.md`
+    - `Release maturity`
+    - `Public beta minimum bar`
   - `phase_0-5.md`
     - `Immediate next slice`
     - `P0.5.1-P0.5.4 implementation plan`
@@ -125,11 +128,44 @@ When the active phase has a dedicated `phase_*.md` guide:
 - objective:
   - expose analysis services as a proper API surface
 - primary references:
+  - `api-v0-spec.md`
+    - `Design rules`
+    - `Endpoint 1`
+    - `Endpoint 2`
+  - `docs/adr/0004-v0-public-beta-before-phase-3-productization.md`
   - `target-architecture.md`
     - `Target runtimes -> Analysis API runtime`
     - `Migration phases -> Phase 3`
   - `engineering-improvements.md`
     - `Workstream 6: API productization`
+
+## Parallel launch overlay
+
+This is not a separate roadmap phase.
+
+It is the release overlay for getting the first public API live while the broader platform roadmap continues.
+
+### V0 Public Beta overlay
+- status: planned
+- objective:
+  - soft-launch the first paid read-only analysis API during `Phase 0.5`
+  - keep the public contract narrow and stable while the internal platform keeps evolving
+- release policy:
+  - internal alpha remains private
+  - first public release is `v0 Public Beta`
+  - beta pricing should stay cheaper and explicitly solicit feedback
+- minimum bar:
+  - stable JSON schemas for both endpoints
+  - auth or payment works
+  - rate limiting and abuse controls exist
+  - provenance and warnings are returned
+  - basic monitoring and a kill switch exist
+  - short public docs exist
+- phase relationship:
+  - `Phase 0.5` promotes the historical and analysis artifacts that make the beta credible
+  - `Phase 1` moves API assembly behind shared services
+  - `Phase 2` improves market-relationship quality and ranking
+  - `Phase 3` hardens the live runtime instead of being the first day the API exists
 
 ### Phase 4 - Replay and experiment system
 - status: not started
@@ -289,10 +325,24 @@ Execution companion:
   - tighten promotion thresholds and artifact fields where the first real dataset review exposes instability or ambiguity
 
 #### P0.5.4 Platform hooks
-- status: planned
+- status: in progress
+- completed:
+  - defined the first `v0` paid analysis-API contract and public-beta launch policy
+  - added promoted historical-artifact loaders under `services.research.artifacts` so downstream consumers can read saved study outputs without touching raw parquet
+  - added the first `services.api.analysis_v0` service layer to combine live market snapshots with promoted calibration, maker/taker, and sizing contexts
+  - added the first read-only `v0` API routes for ranked opportunities and single-market analysis
+  - added focused tests that cover artifact lookup plus the first `v0` analysis responses with a fake Polymarket client
+  - added shared API-scoped public-beta settings for enablement, maintenance mode, auth mode, rate limits, and request logging
+  - added shared auth, rate-limiting, error-envelope, and request-context middleware modules under `services.api`
+  - wired public-beta access control into the `v0` router with API-key auth first, single-instance in-memory throttling, request IDs, and deterministic error responses
+  - expanded the API docs, env template, and focused tests for auth failures, maintenance mode, throttling, request-context logging, and router error mapping
 - target:
-  - define how historical outputs feed replay, ranking, risk, and analysis APIs later
-  - avoid direct live-runtime integration in the first slice
+  - run internal smoke checks against the live deployment shape before posting the beta broadly
+  - keep the first launch posture honest:
+    - API-key auth first is acceptable if it gets the beta live faster
+    - `x402` can follow behind the same auth boundary without reshaping route handlers
+    - single-instance rate limiting is acceptable only while the deployment stays single-instance
+  - preserve the contract boundary so later phases can deepen ranking, coherence, and replay without rewiring public-beta plumbing
 
 ### Recommended execution order inside Phase 0.5
 
@@ -341,7 +391,31 @@ These are decisions that may change implementation order or exact structure.
   - Phase 0 is now complete
   - begin isolated H0/H1 work with read-only boundaries before the rest of the deeper refactor sequence
 
+### D5 - Commercial priority and first paid product surface
+- status: decided
+- question:
+  - should the repo keep treating private trading as the main near-term product
+  - or should the first commercial milestone be a minimal paid, read-only analysis API that can start serving requests before the full private multi-strategy runtime is mature
+- decision:
+  - prioritize the paid analysis API as the first product milestone
+  - keep `Phase 0.5` active because its durable outputs are the cleanest inputs for early API endpoints
+  - treat private trading as a second consumer of the same shared domain and research contracts rather than the first delivery gate
+  - keep internal alpha private and launch the first public service as `v0 Public Beta`
+  - use a soft-launch posture with cheaper pricing, explicit beta wording, and active feedback collection
+
 ## Change log for this roadmap
+
+### 2026-03-19
+- landed the shared public-beta plumbing layer in `services.api` with API settings, maintenance controls, auth, rate limiting, deterministic errors, request IDs, and request logging
+- updated `P0.5.4` completed work to reflect the implemented public-beta plumbing slice and narrowed the remaining target to deployment smoke and launch readiness
+- changed the next milestone from policy definition to the concrete `P0.5.4` public-beta plumbing slice
+- expanded `P0.5.4` targets to include auth, rate limiting, deterministic errors, monitoring, maintenance controls, and launch docs
+- clarified that API-key auth first and single-instance rate limiting are acceptable beta shortcuts if they stay behind stable boundaries
+
+### 2026-03-18
+- updated the next milestone to include defining the `v0` public-beta minimum bar
+- added a public-beta launch overlay so the API can go live before formal Phase 3 hardening is complete
+- converted the commercial-priority decision into an accepted policy: private alpha, public beta first
 
 ### 2026-03-17
 - implemented the first real `P0.5.1` code slice under `services.research` and `services.tools.profile_historical_dataset`

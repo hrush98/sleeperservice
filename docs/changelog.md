@@ -20,12 +20,273 @@ flowchart TD
   poller -->|focus_only| ws[Polymarket_WS_subscriptions]
   trader -->|focus_only| trading[TradeSignals_and_CLOB_exec]
 
+## 2026-04-14 — Added Railway Bucket-compatible startup sync for promoted API artifacts
+
+### What changed
+- Added `services.research.bucket_sync` to download promoted historical-study artifacts from an S3-compatible bucket into the local `HISTORICAL_RESEARCH_OUTPUT_ROOT` before the API starts serving.
+- Added `ArtifactBucketSettings` with environment-variable support for bucket name, prefix, endpoint, region, and credentials, including fallbacks to standard AWS-style variable names.
+- Wired the API startup path to run the artifact sync automatically when `ARTIFACT_BUCKET_ENABLED=true`.
+- Updated `.env.example` and `README.md` to document the GitHub-deploy plus bucket-backed artifact workflow for Railway.
+- Added focused tests for bucket settings parsing and sync behavior.
+
+### Design decisions
+- Keep the runtime reading local artifact files so the existing `HistoricalArtifactStore` contract does not need to change.
+- Use startup sync rather than per-request bucket reads so the `v0` handlers remain simple and artifact lookups stay filesystem-based.
+- Support generic S3-compatible credentials and endpoints so Railway Buckets are not the only viable storage backend.
+
+### Why
+The repo is ready for a narrow API launch, but the promoted historical artifacts should not live in Git and should not require baking local files into every deploy image. A bucket-backed sync path keeps GitHub deploys clean while preserving the current artifact-loading code.
+
+### Impact
+- Deployments can now pull promoted study bundles from object storage instead of relying on local-only files or image-baked artifacts.
+- The API still needs a writable local path for `HISTORICAL_RESEARCH_OUTPUT_ROOT`, but artifact promotion is now decoupled from code deployment.
+- If bucket sync is enabled and misconfigured, API startup will fail fast instead of serving without expected artifacts.
+
+### How to verify
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 conda run --no-capture-output -n sleeperservice python -m pytest tests/test_bucket_sync.py -q` — verifies bucket settings parsing and sync behavior with a fake S3 client.
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 conda run --no-capture-output -n sleeperservice python -m pytest tests/test_api_public_beta.py tests/test_api_v0.py -q` — verifies the API slice still passes after startup wiring changes.
+- `git diff --check` — confirms the patch is whitespace-clean.
+
+```mermaid
+flowchart TD
+  bucket[Railway Bucket / S3-compatible bucket] --> sync[API startup artifact sync]
+  sync --> local[HISTORICAL_RESEARCH_OUTPUT_ROOT]
+  local --> artifacts[HistoricalArtifactStore]
+  artifacts --> v0[V0 analysis routes]
+```
+
+## 2026-03-19 — Landed the public-beta plumbing layer for `v0`
+
+### What changed
+- Added shared API runtime modules for public-beta settings, bearer API-key auth, single-instance rate limiting, deterministic error envelopes, and request-context middleware.
+- Wired the `v0` analysis router through the new access-control layer so public-beta requests now respect maintenance mode, auth, and throttling before hitting analysis handlers.
+- Updated `/health` to expose beta enablement and maintenance state, and updated the FastAPI app factory to install shared middleware and exception handlers.
+- Added focused tests for auth failures, maintenance behavior, throttling, error-envelope shape, request-context logging, and router-level market-not-found mapping.
+- Updated the env template, README, API spec, and roadmap status to document the implemented public-beta controls and the current API-key-first launch posture.
+
+### Design decisions
+- Ship API-key auth first behind a shared boundary so `x402` can follow without route churn.
+- Keep the first beta on single-instance in-memory rate limiting because it is good enough for the first launch shape and easy to replace later.
+- Use a deterministic error envelope plus `X-Request-ID` on responses so public-beta support and debugging stay lightweight but usable.
+- Keep maintenance mode at the API boundary, blocking `/v0/*` while preserving `/health`.
+
+### Why
+The first `v0` routes were live in code but not yet safe enough to post publicly. This slice adds the minimum shared operational controls needed for a real public beta without pretending the API is already fully productized.
+
+### Impact
+- `/v0/*` now sits behind public-beta controls instead of being openly callable by default when auth is enabled.
+- The API now has a stable error shape and request IDs, which should make debugging and support materially easier.
+- The repo now documents the actual launch posture: API keys first, read-only analysis only, manual maintenance control, and lightweight single-instance limits.
+
+### How to verify
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 conda run --no-capture-output -n sleeperservice python -m pytest tests/test_api_public_beta.py -q` — verifies auth, maintenance mode, throttling, error-envelope shape, middleware logging, and router 404 mapping.
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 conda run --no-capture-output -n sleeperservice python -m pytest tests/test_api_v0.py tests/test_historical_studies.py -q` — verifies the historical-artifact-backed `v0` responses still work after the plumbing changes.
+- `conda run --no-capture-output -n sleeperservice python -c "from services.api.main import app; print(app.title, app.version); print(sorted(route.path for route in app.routes if route.path in ['/', '/health', '/v0/analysis/opportunities', '/v0/markets/{market_id}/analysis']))"` — confirms the app still boots and the public routes are registered.
+- `git diff --check` — confirms the patch is whitespace-clean.
+
+```mermaid
+flowchart TD
+  request[Public beta request] --> middleware[RequestContextMiddleware]
+  middleware --> gate[Maintenance or auth or rate-limit gate]
+  gate --> routes[V0 analysis routes]
+  gate --> errors[Deterministic error envelope]
+  routes --> analysis[V0 analysis service]
+  errors --> response[JSON response + X-Request-ID]
+  analysis --> response
+```
+
+## 2026-03-19 — Detailed the `P0.5.4` public-beta plumbing plan
+
+### What changed
+- Updated the roadmap next milestone so the active build target is now the public-beta plumbing slice rather than the earlier policy-definition work.
+- Expanded `P0.5.4` in the active Phase 0.5 guide with a concrete implementation sequence for API-scoped config, auth, rate limiting, deterministic errors, maintenance mode, monitoring, and launch docs.
+- Added explicit verification and exit criteria for public-beta plumbing, including auth failure behavior, throttling behavior, maintenance behavior, and request-ID logging.
+- Added suggested module boundaries so these concerns land as shared API infrastructure rather than inside route handlers.
+
+### Design decisions
+- Keep public-beta plumbing inside `P0.5.4` instead of treating it as a detached pre-Phase-3 side quest.
+- Prefer stable shared API modules for auth, rate limiting, error handling, and request logging over route-local implementations.
+- Allow pragmatic beta shortcuts where they do not distort the long-term boundary:
+  - API-key auth first is acceptable if it gets the public beta live faster.
+  - single-instance in-memory rate limiting is acceptable only while deployment stays single-instance.
+
+### Why
+The repo already has the first live `v0` routes. The next missing piece is not more speculative analysis logic; it is the shared operational plumbing that makes a narrow public beta safe to post and cheap to iterate on.
+
+### Impact
+- No runtime behavior changed in this docs slice.
+- `P0.5.4` now has an explicit execution plan for the public-beta minimum bar instead of only a high-level checklist.
+- The next implementation sessions can work from one ordered plumbing plan instead of re-deciding scope at the start of each slice.
+
+### How to verify
+- `sed -n '45,95p' docs/platform/implementation-roadmap.md` — confirm the next milestone now targets public-beta plumbing.
+- `sed -n '40,95p' docs/platform/phase_0-5.md` — confirm the immediate next slice now points at `P0.5.4` public-beta plumbing.
+- `sed -n '392,500p' docs/platform/phase_0-5.md` — confirm the detailed `P0.5.4` plumbing plan, suggested module boundaries, verification target, and exit criteria.
+- `git diff --check` — confirms the docs patch is whitespace-clean.
+
+```mermaid
+flowchart TD
+  artifacts[Promoted historical artifacts] --> analysis[V0 analysis service]
+  analysis --> routes[Public v0 routes]
+  config[API-scoped config] --> routes
+  auth[Caller auth or payment identity] --> routes
+  limiter[Rate limiting] --> routes
+  errors[Shared error handling] --> routes
+  middleware[Request IDs and logging] --> routes
+  maintenance[Maintenance mode] --> routes
+```
+
+## 2026-03-18 — Landed the first `v0` analysis API code slice
+
+### What changed
+- Added `services.research.artifacts` to load promoted historical-study outputs from saved Phase 0.5 bundle artifacts instead of querying raw parquet directly.
+- Added `services.api.analysis_v0` as the first analysis service layer that combines live Polymarket market data with promoted calibration, maker/taker, and sizing contexts.
+- Added `GET /v0/analysis/opportunities` and `GET /v0/markets/{market_id}/analysis` to the FastAPI app.
+- Updated the API dependency wiring, router exports, app metadata, roadmap status, and README so the repo now documents the first live `v0` route surface.
+- Added focused tests covering promoted-artifact lookup and the first `v0` analysis responses with a fake Polymarket client.
+
+### Design decisions
+- Keep the first live `v0` slice grounded in promoted historical priors plus live book state instead of inventing an unsupported fair-value engine.
+- Use a dedicated artifact-loader module as the `P0.5.4` boundary so downstream consumers read saved contracts, not raw datasets.
+- Start ranked opportunities with `calibration_watch` style outputs rather than waiting for the entire future ranking stack.
+- Keep single-market analysis honest by returning empty coherence findings for now instead of fabricating unsupported cross-market explanations.
+
+### Why
+The platform needed to move from API planning to real serving infrastructure without skipping the contract boundary work in `P0.5.4`. This slice makes the first public-beta shape technically real: the API can now assemble explainable read-only responses from saved historical outputs and current Polymarket state.
+
+### Impact
+- The FastAPI app now exposes the first `v0` read-only analysis routes alongside the legacy health and ops endpoints.
+- `P0.5.4` is now a real implementation phase, not just a docs placeholder.
+- The repo has an initial downstream consumer of promoted historical-study artifacts, which should make later replay, ranking, and API work less ad hoc.
+
+### How to verify
+- `conda run --no-capture-output -n sleeperservice python -m pytest tests/test_api_v0.py -q` — verifies promoted artifact lookup plus the first `v0` route logic.
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 conda run --no-capture-output -n sleeperservice python -m pytest tests/test_historical_studies.py -q` — verifies the study artifact contracts still match what the new loader expects.
+- `conda run --no-capture-output -n sleeperservice python -c "from services.api.main import app; print(sorted(route.path for route in app.routes if route.path.startswith('/v0')))"` — confirms the new `v0` routes are registered.
+- `git diff --check` — confirms the patch is whitespace-clean.
+
+```mermaid
+flowchart TD
+  studies[Saved historical study artifacts] --> loaders[services.research.artifacts]
+  loaders --> analysis[services.api.analysis_v0]
+  live[Polymarket Gamma + CLOB data] --> analysis
+  analysis --> ranked[GET /v0/analysis/opportunities]
+  analysis --> market[GET /v0/markets/{market_id}/analysis]
+```
+
+## 2026-03-18 — Adopted `v0 Public Beta` as the first public launch policy
+
+### What changed
+- Added release-maturity guidance to `docs/platform/api-v0-spec.md` that distinguishes private internal alpha from the first public `v0 Public Beta`.
+- Added a new ADR, `docs/adr/0004-v0-public-beta-before-phase-3-productization.md`, capturing the decision to launch a narrow public beta before full Phase 3 hardening is complete.
+- Updated the roadmap and active `Phase 0.5` guide so the first public API launch is treated as a parallel beta overlay rather than a separate replacement phase.
+- Documented that the public beta should use cheaper pricing and explicitly solicit feedback.
+
+### Design decisions
+- Separate API contract versioning from release maturity: `v0` is the contract, while alpha and beta describe launch posture.
+- Keep internal alpha private and use public beta as the first outward-facing launch milestone.
+- Allow the API to go live during `Phase 0.5`, while later phases continue to improve its internals and reliability in parallel.
+
+### Why
+The repo now has a credible narrow API contract, but it still needs fast market feedback. Waiting for full Phase 3 productization would delay demand validation unnecessarily, while a public alpha label would undersell the minimum discipline expected of something posted broadly.
+
+### Impact
+- The roadmap now assumes the first public launch is a soft-launched `v0 Public Beta`.
+- `Phase 0.5` promotion work is now judged partly by whether it cleanly supports the first public beta contract.
+- Later phases still matter, but they now deepen and harden a live service rather than gate its first day of existence.
+
+### How to verify
+- `sed -n '100,180p' docs/platform/api-v0-spec.md` — confirm the release-maturity policy and public-beta minimum bar.
+- `sed -n '120,210p' docs/platform/implementation-roadmap.md` — confirm the public-beta launch overlay and Phase 3 references.
+- `sed -n '40,90p' docs/platform/phase_0-5.md` — confirm the active phase guide now treats public beta as a launch overlay inside `Phase 0.5`.
+- `sed -n '1,220p' docs/adr/0004-v0-public-beta-before-phase-3-productization.md` — confirm the decision is recorded as an ADR.
+- `git diff --check` — confirms the docs patch is whitespace-clean.
+
+```mermaid
+flowchart TD
+  alpha[Internal alpha] --> beta[v0 Public Beta soft launch]
+  beta --> phase1[Phase 1 service extraction]
+  beta --> phase2[Phase 2 market graph improvements]
+  beta --> phase3[Phase 3 hardening and productization]
+```
+
+## 2026-03-18 — Added the first API v0 product spec
+
+### What changed
+- Added `docs/platform/api-v0-spec.md` as the first concrete spec for the earliest viable paid read-only analysis API.
+- Kept the API surface intentionally small with two endpoints: ranked opportunities and single-market analysis.
+- Added an explicit `market_state` response block so agents can evaluate whether an opportunity is calm, thin, or moving quickly without inferring trader identity.
+- Updated the platform docs index and the roadmap Phase 3 references to point at the new API spec.
+
+### Design decisions
+- Ground `v0` in current repo strengths: historical-study priors, coherence findings, and live market-state context.
+- Replace raw “reasoning trace” language with structured `evidence_trace` output so the product remains explainable without exposing chain-of-thought.
+- Exclude unsupported claims such as authoritative fair-value fields, “sharp money” inference, signal history, and historical analog stories until those become real platform contracts.
+
+### Why
+The repo now has enough clarity on product direction to define the first paid API surface, but not enough mature modeling to justify a flashy speculative contract. This spec narrows the product to something that is commercially plausible and technically defensible.
+
+### Impact
+- No runtime behavior changed from this documentation slice alone.
+- Phase 3 now has a concrete endpoint contract to build toward instead of a generic “analysis API” placeholder.
+- Phase 0.5 output review can now judge promotable artifacts partly by whether they cleanly support `v0` response fields.
+
+### How to verify
+- `sed -n '1,260p' docs/platform/api-v0-spec.md` — confirm the two-endpoint API shape, the `market_state` block, and the explicit non-goals.
+- `sed -n '1,80p' docs/platform/README.md` — confirm the docs index now includes `api-v0-spec.md`.
+- `sed -n '120,145p' docs/platform/implementation-roadmap.md` — confirm the Phase 3 references now point at `api-v0-spec.md`.
+- `git diff --check` — confirms the docs patch is whitespace-clean.
+
+```mermaid
+flowchart TD
+  liveData[Polymarket market data] --> analysis[Analysis service layer]
+  studies[Historical study artifacts] --> analysis
+  coherence[Coherence findings] --> analysis
+  analysis --> ranked[GET /v0/analysis/opportunities]
+  analysis --> market[GET /v0/markets/{market_id}/analysis]
+```
+
+## 2026-03-18 — Shifted roadmap bias toward an earlier paid analysis API
+
+### What changed
+- Updated the roadmap next milestone to include defining the earliest viable paid analysis-API surface alongside the ongoing `P0.5.3` review.
+- Added a new roadmap open decision stating that the first commercial milestone should bias toward a minimal paid, read-only analysis API rather than waiting for the full private multi-strategy runtime.
+- Updated the active `Phase 0.5` guide so `P0.5.4` contract shaping explicitly favors early read-only API consumers.
+
+### Design decisions
+- Keep `Phase 0.5` active instead of skipping straight into a live API build, because the historical artifacts are the cleanest explainable inputs for a first paid product.
+- Bias the first commercial surface toward read-only analysis endpoints, not trade execution, so the public product can start serving requests without coupling customer traffic to private trading controls.
+- Treat private trading as a second consumer of the same research and domain contracts rather than the first delivery gate.
+
+### Why
+The repo direction had become muddy between “build a sophisticated private trader” and “ship something customers can pay for.” The roadmap now makes the commercial ordering explicit: start serving a narrow paid analysis product sooner, while continuing to use Phase 0.5 to define the durable data contracts that product will need.
+
+### Impact
+- No runtime behavior changed from this docs update alone.
+- Future `P0.5.3` and `P0.5.4` work should evaluate outputs partly by whether they can back an early paid API surface.
+- The platform still targets both a private trading system and a public or semi-public analysis API, but the API is now the intended first product milestone.
+
+### How to verify
+- `sed -n '35,120p' docs/platform/implementation-roadmap.md` — confirm the next milestone now mentions the earliest viable paid analysis-API surface.
+- `sed -n '300,360p' docs/platform/implementation-roadmap.md` — confirm `D5` captures the commercial priority shift.
+- `sed -n '35,70p' docs/platform/phase_0-5.md` and `sed -n '380,430p' docs/platform/phase_0-5.md` — confirm `P0.5.4` now explicitly biases toward early read-only analysis API consumers.
+- `git diff --check` — confirms the docs patch is whitespace-clean.
+
+```mermaid
+flowchart TD
+  studies[P0.5.3 historical studies] --> hooks[P0.5.4 artifact contracts and loaders]
+  hooks --> api[Paid read-only analysis API]
+  hooks --> replay[Replay, ranking, and risk consumers]
+  replay --> trading[Private trading runtime later]
+```
+
 ## 2026-03-18 — Persisted normalized historical tables in DuckDB
 
 ### What changed
 - Switched the normalized `historical_*` research layer in `services.research.materialize` from persistent DuckDB views to persistent DuckDB tables.
 - Kept raw Becker parquet access in temporary source views during materialization, then wrote the normalized historical layer into stored DuckDB tables for later study runs.
 - Recorded the storage mode in materialization metadata and extended the materialization tests to assert that the core `historical_*` objects are `BASE TABLE`s.
+- Added a `--skip-bucket-stats` study-ready materialization path so large review builds can omit `historical_bucket_stats` when only `historical_trade_features`-driven studies are needed.
 - Updated the materializer CLI text, README, roadmap, and Phase 0.5 guide so the docs match the new persisted-table design.
 
 ### Design decisions
@@ -40,9 +301,10 @@ The first real Becker review exposed that the database was only storing view def
 - Future study runs can read persisted normalized tables instead of rescanning raw parquet through view chains.
 - Materialization becomes a more meaningful one-time build step for a dataset snapshot.
 - Phase 0.5 review work should now be safer to do venue-by-venue, especially for Polymarket-first analysis.
+- Large one-off review builds have a lighter study-ready path when bucket-stat aggregation would just add cost without helping the current study bundle.
 
 ### How to verify
-- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 conda run -n sleeperservice python -m pytest tests/test_historical_research_materialize.py -q` — confirms the materializer still works and the normalized objects are persisted tables.
+- `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 conda run -n sleeperservice python -m pytest tests/test_historical_research_materialize.py -q` — confirms the materializer still works, the normalized objects are persisted tables, and the study-ready bucket-stat skip path behaves correctly.
 - `conda run -n sleeperservice python -m services.tools.materialize_historical_research --help` — confirms the CLI entrypoint still loads cleanly.
 - `git diff --check` — confirms the patch is whitespace-clean.
 
