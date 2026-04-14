@@ -20,6 +20,35 @@ flowchart TD
   poller -->|focus_only| ws[Polymarket_WS_subscriptions]
   trader -->|focus_only| trading[TradeSignals_and_CLOB_exec]
 
+## 2026-04-14 — Updated Postgres driver pin for Railway Python 3.13 runtime compatibility
+
+### What changed
+- Bumped `psycopg2-binary` from `2.9.9` to `2.9.11` in `requirements.txt`.
+
+### Design decisions
+- Kept the existing SQLAlchemy + `psycopg2` stack instead of changing the application over to `psycopg` v3 during launch setup.
+- Fixed the deploy issue at the dependency layer because the failure was runtime packaging, not schema or app logic.
+
+### Why
+Railway was building the service on Python 3.13 and failing at import time with `ImportError: libpq.so.5: cannot open shared object file`. The older `psycopg2-binary==2.9.9` pin is too old for that runtime shape, while newer releases provide current wheels for modern Python versions.
+
+### Impact
+- Railway deploys should no longer require a system `libpq` package just to import the Postgres DBAPI.
+- No schema or app behavior changed; this is a runtime packaging fix only.
+- Existing migration commands and `DATABASE_URL` handling stay the same.
+
+### How to verify
+- `conda run -n sleeperservice env PYTHONNOUSERSITE=1 python -c "import psycopg2; print(psycopg2.__version__)"` — should report the upgraded driver version after reinstalling local dependencies if you choose to sync the local env.
+- Redeploy the Railway API service and confirm the previous `libpq.so.5` import failure disappears from startup logs.
+- `git diff --check` — confirms the patch is whitespace-clean.
+
+```mermaid
+flowchart TD
+  railway[Railway Python 3.13 runtime] --> import[import psycopg2]
+  import --> wheel[psycopg2-binary wheel]
+  wheel --> api[API startup continues]
+```
+
 ## 2026-04-14 — Added Railway Bucket-compatible startup sync for promoted API artifacts
 
 ### What changed
